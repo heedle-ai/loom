@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]   # Linux amd64, Linux arm64, macOS Apple Silicon
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: loom
+      - uses: actions/checkout@v4      # go.mod replaces the heedle-ai modules with ../
+        with:
+          repository: heedle-ai/weft
+          path: weft
+      - uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/shuttle
+          path: shuttle
+      - uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/draft
+          path: draft
+      - uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/warp
+          path: warp
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: loom/go.mod
+          cache-dependency-path: loom/go.sum
+      - name: gofmt
+        working-directory: loom
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        working-directory: loom
+        run: go vet ./...
+      - name: test
+        working-directory: loom
+        run: go test -race ./...
