@@ -1,4 +1,7 @@
-package main
+// Package shipment holds the hello world's two commands, source and
+// assess, and its program. It is importable so other tools (such as the
+// drawdown UI) can offer the example.
+package shipment
 
 import (
 	"context"
@@ -6,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -19,6 +23,12 @@ import (
 	"github.com/heedle-ai/weft"
 )
 
+// Program is the hello world program: is the shipment late?
+const Program = `(pipe
+  (par (source "weather") (source "carrier") (source "factory"))
+  (assess "the shipment will be late"))
+`
+
 // The two commands this example adds to draft. Each is a weft arrow from a
 // plan node's input to a string, registered as a Temporal activity.
 //
@@ -27,6 +37,16 @@ import (
 //
 // A source file is two lines: a signal ("delay" or "on-time"), then a
 // one-line summary.
+
+// SourcesDir is the example's sources folder (examples/hello/sources),
+// found next to this file so it works from any directory.
+func SourcesDir() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "sources"
+	}
+	return filepath.Join(filepath.Dir(file), "..", "sources")
+}
 
 // Registry is draft's default registry plus source and assess.
 func Registry() *registry.Registry {
