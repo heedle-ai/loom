@@ -82,6 +82,12 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 			return RunResult{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
 		}
 	}
+	// Checking the ref needs git, so it's a local activity, run before the
+	// plan so a bad ref costs nothing.
+	check := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{StartToCloseTimeout: 10 * time.Second})
+	if err := workflow.ExecuteLocalActivity(check, CheckRef, in.Ref).Get(ctx, nil); err != nil {
+		return RunResult{}, err
+	}
 
 	child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: info.WorkflowExecution.ID + "/plan",
@@ -94,12 +100,14 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 	act := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute,
 		// A conflict means another run advanced the ref first; Temporal's
-		// retry re-runs Record, which rebuilds on the new head.
+		// retry re-runs Record, which rebuilds on the new head. Retries are
+		// bounded by time, not attempts, so heavy contention can't exhaust
+		// them; invalid input is non-retryable and fails at once.
+		ScheduleToCloseTimeout: 10 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:    100 * time.Millisecond,
 			BackoffCoefficient: 2,
 			MaximumInterval:    5 * time.Second,
-			MaximumAttempts:    20,
 		},
 	})
 	rec := RecordInput{
@@ -116,6 +124,15 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		return RunResult{}, err
 	}
 	return RunResult{Commit: commit, Outputs: res.Outputs, Leaves: res.Leaves}, nil
+}
+
+// CheckRef is a local activity: it fails with the non-retryable error type
+// "InvalidInput" unless ref is a valid full ref name (git check-ref-format).
+func CheckRef(ctx context.Context, ref string) error {
+	if err := warp.CheckRef(ctx, ref); err != nil {
+		return temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+	}
+	return nil
 }
 
 // Recorder holds the warp store the Record activity writes to.
@@ -280,8 +297,8 @@ func WorkflowID(ctx context.Context, in RunInput) (string, error) {
 }
 
 // Submit starts RunWorkflow for a compiled plan and returns the run handle
-// without waiting. While a run of the same plan is in progress, Submit
-// joins it instead of starting another.
+// without waiting. While a run of exactly the same input (program, plan
+// and ref) is in progress, Submit joins it instead of starting another.
 func Submit(ctx context.Context, c client.Client, taskQueue string, in RunInput) (client.WorkflowRun, error) {
 	if in.Ref == "" {
 		in.Ref = DefaultRef

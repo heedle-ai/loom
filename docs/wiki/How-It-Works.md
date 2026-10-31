@@ -4,7 +4,7 @@
 func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error)
 ```
 
-1. Check that every node ID can be a Git tree entry name (`warp.ValidName`, no I/O). If not, fail at once with the non-retryable error type `InvalidInput`, before anything runs. An empty ref means `refs/loom/runs`.
+1. Check the input before anything runs: every node ID must be a valid Git tree entry name (`warp.ValidName`, no I/O), and the ref must pass `git check-ref-format` (run as a Temporal local activity). Otherwise fail at once with the non-retryable error type `InvalidInput`. An empty ref means `refs/loom/runs`.
 2. Run `in.Plan` as shuttle's `PlanWorkflow`, as a **child workflow** with ID `<run workflow ID>/plan`. loom doesn't wrap or change it.
 3. Run the **`Record`** activity with the program, plan, results, ref, the Temporal workflow and run IDs, and `workflow.Now`.
 4. Return the outputs and the commit ID.
@@ -40,7 +40,7 @@ The commit time is the workflow's clock at the moment of recording, never the wa
 
 ## Concurrency and retries
 
-Several runs can finish at once and all append to the same ref. `Record` reads the head, builds its commit on top, and moves the ref with warp's compare-and-swap. If another run moved the ref first, the swap fails with `warp.ErrConflict`. The activity fails, and **Temporal's retry policy** runs it again on the new head: up to 20 attempts, backing off from 100 ms to 5 s. loom has no retry loop of its own.
+Several runs can finish at once and all append to the same ref. `Record` reads the head, builds its commit on top, and moves the ref with warp's compare-and-swap. If another run moved the ref first, the swap fails with `warp.ErrConflict`. The activity fails, and **Temporal's retry policy** runs it again on the new head, backing off from 100 ms to 5 s for up to 10 minutes. Retries are bounded by time, not by a number of attempts, so heavy contention can't exhaust them. loom has no retry loop of its own.
 
 ## Idempotency
 

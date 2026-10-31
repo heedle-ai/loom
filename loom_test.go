@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
@@ -304,6 +306,25 @@ func TestRun_InvalidNodeNamesFailBeforeRunning(t *testing.T) {
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), "tree entry name") {
 		t.Fatalf("err = %v, want an invalid-name error", err)
+	}
+}
+
+func TestRun_InvalidRefFailsBeforeRunning(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	loom.Register(env, newStore(t))
+	ran := false
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		if info.ActivityType.Name == plan.EchoName {
+			ran = true
+		}
+	})
+	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: program, Plan: compile(t, program), Ref: "refs/bad..ref"})
+	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), "ref name") {
+		t.Fatalf("err = %v, want an invalid ref error", err)
+	}
+	if ran {
+		t.Error("the plan ran before the ref was checked")
 	}
 }
 

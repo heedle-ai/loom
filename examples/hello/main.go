@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 
 	"go.temporal.io/sdk/client"
@@ -33,13 +35,26 @@ const Program = `(pipe
 
 const queue = "loom-hello"
 
+// defaultSources is the sources folder next to this file, so the example
+// works from any directory when run with go run.
+func defaultSources() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "sources"
+	}
+	return filepath.Join(filepath.Dir(file), "sources")
+}
+
 func main() {
 	store := flag.String("store", "", "warp store directory (created if missing)")
-	sources := flag.String("sources", "examples/hello/sources", "directory of source files")
+	sources := flag.String("sources", defaultSources(), "directory of source files")
 	address := flag.String("address", client.DefaultHostPort, "Temporal frontend address")
 	flag.Parse()
 	if *store == "" {
 		log.Fatal("give -store DIR, e.g. -store ~/hello-store.git")
+	}
+	if fi, err := os.Stat(*sources); err != nil || !fi.IsDir() {
+		log.Fatalf("sources directory %q not found; pass -sources DIR", *sources)
 	}
 	ctx := context.Background()
 

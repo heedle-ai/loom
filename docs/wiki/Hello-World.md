@@ -17,7 +17,7 @@
 | loom | Composes it all: `RunWorkflow = PlanWorkflow >>> Record` |
 | [drawdown](https://github.com/heedle-ai/drawdown/wiki) | You read the history with `git log`, `git show` and `git diff` |
 
-The sources are files in `examples/hello/sources/`. Each is two lines: a signal (`delay` or `on-time`), then a summary.
+The sources are files in `examples/hello/sources/`. Each is a signal on the first line, exactly `delay` or `on-time`, then an optional one-line summary. Anything else (an unknown signal, a missing file, a symlink, a name outside `[a-z0-9-]`) fails the run at once rather than being guessed at.
 
 ```text
 weather.txt   delay     Storm closes the port of Long Beach for three days.
@@ -142,7 +142,7 @@ git --git-dir ~/hello-store.git show refs/loom/runs~2:outputs/n3
 
 - `TestHello_EvidenceChangesAndGitShowsWhy` runs it three times with changing sources. It checks each output, that history is three commits each on top of the last, that `git diff --name-only` between consecutive runs lists exactly the changed source and the conclusion, that the plan blob is reused, and that `git fsck --strict` passes.
 - `TestHello_RunsThroughLoom` runs it through the full `RunWorkflow`.
-- `TestHello_BadSourceNameIsRejected` checks that a source name can't escape the sources directory.
+- `TestHello_BadSourceNameIsRejected` and `TestHello_SourcesAreStrict` check that sources can't escape their directory, that summary-less sources are read correctly, and that malformed input fails without retrying.
 
 To keep the test's store and explore it yourself:
 
