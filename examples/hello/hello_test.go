@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/heedle-ai/loom"
+	"github.com/heedle-ai/loom/examples/hello/shipment"
 	"github.com/heedle-ai/shuttle/plan"
 	"github.com/heedle-ai/warp"
 )
@@ -61,14 +62,14 @@ func (w *world) set(name, signal, summary string) {
 // Recorder, as RunWorkflow does, giving each run its own run ID.
 func (w *world) run() (plan.Result, warp.ID) {
 	w.t.Helper()
-	p, err := loom.Compile(ctx, Registry(), Program)
+	p, err := loom.Compile(ctx, shipment.Registry(), shipment.Program)
 	if err != nil {
 		w.t.Fatal(err)
 	}
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	plan.Register(env)
-	RegisterCommands(env, w.sources)
+	shipment.RegisterCommands(env, w.sources)
 	env.ExecuteWorkflow(plan.WorkflowName, p)
 	if err := env.GetWorkflowError(); err != nil {
 		w.t.Fatal(err)
@@ -78,10 +79,10 @@ func (w *world) run() (plan.Result, warp.ID) {
 		w.t.Fatal(err)
 	}
 	w.runs++
-	in := loom.RunInput{Program: Program, Plan: p, Ref: loom.DefaultRef}
+	in := loom.RunInput{Program: shipment.Program, Plan: p, Ref: loom.DefaultRef}
 	id, _ := loom.WorkflowID(ctx, in)
 	c, err := (&loom.Recorder{Store: w.store}).Record(ctx, loom.RecordInput{
-		Program: Program, Plan: p, Result: res, Ref: loom.DefaultRef,
+		Program: shipment.Program, Plan: p, Result: res, Ref: loom.DefaultRef,
 		WorkflowID: id, RunID: "run-" + string(rune('0'+w.runs)), At: time.Unix(1761900000+int64(w.runs)*60, 0),
 	})
 	if err != nil {
@@ -153,15 +154,15 @@ func TestHello_RunsThroughLoom(t *testing.T) {
 	// The full composition, RunWorkflow = PlanWorkflow >>> Record, with the
 	// example's commands registered on the same worker.
 	w := newWorld(t)
-	p, err := loom.Compile(ctx, Registry(), Program)
+	p, err := loom.Compile(ctx, shipment.Registry(), shipment.Program)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	loom.Register(env, w.store)
-	RegisterCommands(env, w.sources)
-	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: Program, Plan: p})
+	shipment.RegisterCommands(env, w.sources)
+	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: shipment.Program, Plan: p})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +180,7 @@ func TestHello_RunsThroughLoom(t *testing.T) {
 
 func TestHello_BadSourceNameIsRejected(t *testing.T) {
 	w := newWorld(t)
-	_, err := Source(w.sources)(ctx, plan.Input{Args: []string{"../../etc/passwd"}})
+	_, err := shipment.Source(w.sources)(ctx, plan.Input{Args: []string{"../../etc/passwd"}})
 	if err == nil {
 		t.Fatal("path traversal accepted")
 	}
@@ -187,7 +188,7 @@ func TestHello_BadSourceNameIsRejected(t *testing.T) {
 
 func TestHello_SourcesAreStrict(t *testing.T) {
 	w := newWorld(t)
-	src := Source(w.sources)
+	src := shipment.Source(w.sources)
 
 	// A signal with no summary is still read correctly...
 	w.set("weather", "delay", "")
@@ -196,7 +197,7 @@ func TestHello_SourcesAreStrict(t *testing.T) {
 		t.Fatalf("summary-less source = %q, %v", out, err)
 	}
 	// ...and counts for the claim.
-	verdict, err := Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": out}})
+	verdict, err := shipment.Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": out}})
 	if err != nil || !strings.Contains(verdict, "SUPPORTED\n  for:     weather") {
 		t.Fatalf("verdict = %q, %v", verdict, err)
 	}
@@ -218,10 +219,10 @@ func TestHello_SourcesAreStrict(t *testing.T) {
 			t.Errorf("%s: err = %v, want a non-retryable error", name, err)
 		}
 	}
-	if _, err := Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": "garbage"}}); err == nil {
+	if _, err := shipment.Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": "garbage"}}); err == nil {
 		t.Error("assess accepted a non-report input")
 	}
-	if _, err := Assess()(ctx, plan.Input{}); err == nil {
+	if _, err := shipment.Assess()(ctx, plan.Input{}); err == nil {
 		t.Error("assess accepted no claim")
 	}
 }

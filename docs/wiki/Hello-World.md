@@ -15,7 +15,7 @@
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Runs the three sources in parallel on Temporal, then the assessor |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Stores the program, the plan and every output as Git objects in one commit |
 | loom | Composes it all: `RunWorkflow = PlanWorkflow >>> Record` |
-| [drawdown](https://github.com/heedle-ai/drawdown/wiki) | You read the history with `git log`, `git show` and `git diff` |
+| [drawdown](https://github.com/heedle-ai/drawdown/wiki) | The web UI: run it from the browser and see the diff there; or use `git log`, `git show` and `git diff` |
 
 The sources are files in `examples/hello/sources/`. Each is a signal on the first line, exactly `delay` or `on-time`, then an optional one-line summary. Anything else (an unknown signal, a missing file, a symlink, a name outside `[a-z0-9-]`) fails the run at once rather than being guessed at.
 
@@ -53,6 +53,8 @@ recorded as <commit ID> on refs/loom/runs
 ```
 
 The program starts its own worker, so one terminal plus the dev server is enough. Watch the run at http://localhost:8233: the three `Source` activities start together, and `Assess` starts when all three are done.
+
+Prefer a browser? [drawdown](https://github.com/heedle-ai/drawdown/wiki/Getting-Started) runs this same example with a plan graph, live status and a visual diff.
 
 ## Change the evidence, run again
 

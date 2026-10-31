@@ -16,38 +16,21 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sort"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/heedle-ai/loom"
+	"github.com/heedle-ai/loom/examples/hello/shipment"
 	"github.com/heedle-ai/warp"
 )
 
-// Program is the hello world program.
-const Program = `(pipe
-  (par (source "weather") (source "carrier") (source "factory"))
-  (assess "the shipment will be late"))
-`
-
 const queue = "loom-hello"
-
-// defaultSources is the sources folder next to this file, so the example
-// works from any directory when run with go run.
-func defaultSources() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "sources"
-	}
-	return filepath.Join(filepath.Dir(file), "sources")
-}
 
 func main() {
 	store := flag.String("store", "", "warp store directory (created if missing)")
-	sources := flag.String("sources", defaultSources(), "directory of source files")
+	sources := flag.String("sources", shipment.SourcesDir(), "directory of source files")
 	address := flag.String("address", client.DefaultHostPort, "Temporal frontend address")
 	flag.Parse()
 	if *store == "" {
@@ -70,17 +53,17 @@ func main() {
 
 	w := worker.New(c, queue, worker.Options{})
 	loom.Register(w, s)
-	RegisterCommands(w, *sources)
+	shipment.RegisterCommands(w, *sources)
 	if err := w.Start(); err != nil {
 		log.Fatal(err)
 	}
 	defer w.Stop()
 
-	p, err := loom.Compile(ctx, Registry(), Program)
+	p, err := loom.Compile(ctx, shipment.Registry(), shipment.Program)
 	if err != nil {
 		log.Fatal(err)
 	}
-	run, err := loom.Submit(ctx, c, queue, loom.RunInput{Program: Program, Plan: p})
+	run, err := loom.Submit(ctx, c, queue, loom.RunInput{Program: shipment.Program, Plan: p})
 	if err != nil {
 		log.Fatal(err)
 	}

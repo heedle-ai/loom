@@ -24,7 +24,7 @@ Every arrow is an existing, tested piece. loom's own code is the composition `Ru
 | [draft](https://github.com/heedle-ai/draft/wiki) | Language: how you *write* a computation |
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Durable execution: how the work *ran* |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Content-addressed store: what the system *knows* |
-| [drawdown](https://github.com/heedle-ai/drawdown/wiki) | Viewing runs and history |
+| [drawdown](https://github.com/heedle-ai/drawdown/wiki) | Web UI: write, run and browse programs and records |
 | **loom** | Runs them together (this repo) |
 
 ## Pages
