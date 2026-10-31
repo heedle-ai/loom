@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/heedle-ai/loom"
@@ -180,5 +182,46 @@ func TestHello_BadSourceNameIsRejected(t *testing.T) {
 	_, err := Source(w.sources)(ctx, plan.Input{Args: []string{"../../etc/passwd"}})
 	if err == nil {
 		t.Fatal("path traversal accepted")
+	}
+}
+
+func TestHello_SourcesAreStrict(t *testing.T) {
+	w := newWorld(t)
+	src := Source(w.sources)
+
+	// A signal with no summary is still read correctly...
+	w.set("weather", "delay", "")
+	out, err := src(ctx, plan.Input{Args: []string{"weather"}})
+	if err != nil || out != "weather: delay\n" {
+		t.Fatalf("summary-less source = %q, %v", out, err)
+	}
+	// ...and counts for the claim.
+	verdict, err := Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": out}})
+	if err != nil || !strings.Contains(verdict, "SUPPORTED\n  for:     weather") {
+		t.Fatalf("verdict = %q, %v", verdict, err)
+	}
+
+	// Unknown signals, missing files, symlinks and missing args are rejected.
+	w.set("carrier", "Delay", "capitalised")
+	if err := os.Symlink("/etc/hostname", filepath.Join(w.sources, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for name, in := range map[string]plan.Input{
+		"unknown signal": {Args: []string{"carrier"}},
+		"missing file":   {Args: []string{"nowhere"}},
+		"symlink":        {Args: []string{"link"}},
+		"no args":        {},
+	} {
+		_, err := src(ctx, in)
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || !appErr.NonRetryable() {
+			t.Errorf("%s: err = %v, want a non-retryable error", name, err)
+		}
+	}
+	if _, err := Assess()(ctx, plan.Input{Args: []string{"late"}, Upstream: map[string]string{"n0": "garbage"}}); err == nil {
+		t.Error("assess accepted a non-report input")
+	}
+	if _, err := Assess()(ctx, plan.Input{}); err == nil {
+		t.Error("assess accepted no claim")
 	}
 }

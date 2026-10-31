@@ -51,21 +51,48 @@ func RegisterCommands(w Activities, dir string) {
 
 var sourceName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// Source reads one source file: read >>> format.
+// Source reads one source file: read >>> format. Its output is
+// "<name>: <signal>" plus ": <summary>" when there is one. Anything that can
+// never succeed (a bad name, a missing or non-regular file, an unknown
+// signal) fails with the non-retryable error type "InvalidInput".
 func Source(dir string) weft.Arrow[plan.Input, string] {
-	read := weft.ArrowFunc(func(_ context.Context, in plan.Input) ([2]string, error) {
-		name := in.Args[0]
-		if !sourceName.MatchString(name) {
-			return [2]string{}, temporal.NewNonRetryableApplicationError("bad source name "+name, "InvalidInput", nil)
+	read := weft.ArrowFunc(func(_ context.Context, in plan.Input) ([3]string, error) {
+		if len(in.Args) != 1 || !sourceName.MatchString(in.Args[0]) {
+			return [3]string{}, invalid("source takes one name of lowercase letters, digits and hyphens, got %q", in.Args)
 		}
-		b, err := os.ReadFile(filepath.Join(dir, name+".txt"))
-		return [2]string{name, string(b)}, err
+		name := in.Args[0]
+		path := filepath.Join(dir, name+".txt")
+		// Lstat, not Stat: a symlink could point anywhere on the machine.
+		if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+			return [3]string{}, invalid("source %q: %s is missing or not a regular file", name, path)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return [3]string{}, err
+		}
+		signal, summary, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+		signal = strings.TrimSpace(signal)
+		if signal != signalDelay && signal != signalOnTime {
+			return [3]string{}, invalid("source %q: first line must be %q or %q, got %q", name, signalDelay, signalOnTime, signal)
+		}
+		return [3]string{name, signal, strings.TrimSpace(summary)}, nil
 	})
-	format := weft.Pure(func(f [2]string) string {
-		signal, summary, _ := strings.Cut(strings.TrimSpace(f[1]), "\n")
-		return fmt.Sprintf("%s: %s: %s\n", f[0], strings.TrimSpace(signal), strings.TrimSpace(summary))
+	format := weft.Pure(func(f [3]string) string {
+		if f[2] == "" {
+			return f[0] + ": " + f[1] + "\n"
+		}
+		return f[0] + ": " + f[1] + ": " + f[2] + "\n"
 	})
 	return weft.Compose(read, format)
+}
+
+const (
+	signalDelay  = "delay"
+	signalOnTime = "on-time"
+)
+
+func invalid(format string, args ...any) error {
+	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(format, args...), "InvalidInput", nil)
 }
 
 type evidence struct {
@@ -78,22 +105,28 @@ type evidence struct {
 // conclusion names exactly which sources did. Names are sorted, so the
 // output doesn't depend on node order.
 func Assess() weft.Arrow[plan.Input, string] {
-	collect := weft.Pure(func(in plan.Input) evidence {
+	collect := weft.ArrowFunc(func(_ context.Context, in plan.Input) (evidence, error) {
+		if len(in.Args) != 1 {
+			return evidence{}, invalid("assess takes one claim, got %q", in.Args)
+		}
 		e := evidence{claim: in.Args[0]}
-		for _, out := range in.Upstream {
-			parts := strings.SplitN(strings.TrimSpace(out), ": ", 3)
-			if len(parts) < 2 {
-				continue
-			}
-			if parts[1] == "delay" {
-				e.for_ = append(e.for_, parts[0])
-			} else {
-				e.other = append(e.other, parts[0])
+		for node, out := range in.Upstream {
+			name, rest, ok := strings.Cut(strings.TrimSpace(out), ": ")
+			signal, _, _ := strings.Cut(rest, ": ")
+			switch {
+			case !ok:
+				return evidence{}, invalid("assess: input from %s isn't a source report: %q", node, out)
+			case signal == signalDelay:
+				e.for_ = append(e.for_, name)
+			case signal == signalOnTime:
+				e.other = append(e.other, name)
+			default:
+				return evidence{}, invalid("assess: input from %s has unknown signal %q", node, signal)
 			}
 		}
 		sort.Strings(e.for_)
 		sort.Strings(e.other)
-		return e
+		return e, nil
 	})
 	render := weft.Pure(func(e evidence) string {
 		verdict := "NOT SUPPORTED"
