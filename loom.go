@@ -13,6 +13,7 @@ package loom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -43,9 +44,9 @@ const (
 
 // RunInput is what RunWorkflow receives.
 type RunInput struct {
-	Program string    // draft source, recorded verbatim
-	Plan    plan.Plan // the program, compiled
-	Ref     string    // warp ref to append the run to
+	Program string    `json:"program"` // draft source, recorded verbatim
+	Plan    plan.Plan `json:"plan"`    // the program, compiled
+	Ref     string    `json:"ref"`     // warp ref to append the run to
 }
 
 // RunResult is what RunWorkflow returns.
@@ -71,6 +72,16 @@ type RecordInput struct {
 // result in warp. It contains no logic of its own beyond that sequence.
 func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 	info := workflow.GetInfo(ctx)
+	if in.Ref == "" {
+		in.Ref = DefaultRef
+	}
+	// Every node's output becomes a tree entry; reject names that can't be
+	// one before running anything. (ValidName does no I/O.)
+	for _, n := range in.Plan.Nodes {
+		if err := warp.ValidName(string(n.ID)); err != nil {
+			return RunResult{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+		}
+	}
 
 	child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: info.WorkflowExecution.ID + "/plan",
@@ -122,9 +133,19 @@ type Recorder struct {
 //
 // Record is idempotent: if a commit for this Temporal run is already on the
 // ref with the same tree, it returns that commit; with a different tree it
-// fails with the non-retryable error type "RecordMismatch". If another run advanced the ref first, it
+// fails with the non-retryable error type "RecordMismatch". Input that can
+// never be recorded (an invalid ref or node name) fails with the
+// non-retryable error type "InvalidInput". If another run advanced the ref first, it
 // returns warp.ErrConflict and Temporal retries it on the new head.
 func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) {
+	c, err := r.record(ctx, in)
+	if errors.Is(err, warp.ErrInvalid) {
+		return "", temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+	}
+	return c, err
+}
+
+func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) {
 	s := r.Store
 
 	program, err := s.PutBlob(ctx, []byte(in.Program))
@@ -133,7 +154,7 @@ func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	}
 	planJSON, err := PlanJSON(in.Plan)
 	if err != nil {
-		return "", temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+		return "", fmt.Errorf("%w: %v", warp.ErrInvalid, err)
 	}
 	planBlob, err := s.PutBlob(ctx, planJSON)
 	if err != nil {
@@ -160,30 +181,33 @@ func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		return "", err
 	}
 
-	// Already recorded (a Temporal retry after a success)? Return that
-	// commit, but only if it records exactly this run's content.
-	if done, ok, err := s.FindByTrailer(ctx, in.Ref, TrailerRun, in.RunID); err != nil {
-		return "", err
-	} else if ok {
-		doneTree, _, err := s.Parents(ctx, done)
-		if err != nil {
-			return "", err
-		}
-		if doneTree != tree {
-			msg := fmt.Sprintf("run %s is already recorded as %s with different content", in.RunID, done)
-			return "", temporal.NewNonRetryableApplicationError(msg, "RecordMismatch", nil)
-		}
-		return done, nil
-	}
-
+	// Read the head once. Both the "already recorded?" check and the
+	// compare-and-swap use this same head, so if another attempt records
+	// this run in between, the swap fails and the retry finds its commit.
 	head, exists, err := s.Resolve(ctx, in.Ref)
 	if err != nil {
 		return "", err
 	}
 	var parents []warp.ID
 	if exists {
+		done, ok, err := s.FindByTrailer(ctx, head, TrailerRun, in.RunID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			doneTree, _, err := s.Parents(ctx, done)
+			if err != nil {
+				return "", err
+			}
+			if doneTree != tree {
+				msg := fmt.Sprintf("run %s is already recorded as %s with different content", in.RunID, done)
+				return "", temporal.NewNonRetryableApplicationError(msg, "RecordMismatch", nil)
+			}
+			return done, nil
+		}
 		parents = []warp.ID{head}
 	}
+
 	commit, err := s.Commit(ctx, warp.CommitSpec{
 		Tree:    tree,
 		Parents: parents,
@@ -229,11 +253,22 @@ func Compile(ctx context.Context, reg *registry.Registry, program string) (plan.
 	return draft.Compile(ctx, reg, draft.Source(program))
 }
 
-// WorkflowID names the workflow after what it runs: "loom-" plus the Git
-// blob ID of the plan's canonical JSON. Concurrent submissions of the same
-// plan join one execution; each execution's run ID tells runs apart.
-func WorkflowID(ctx context.Context, p plan.Plan) (string, error) {
-	b, err := PlanJSON(p)
+// InputJSON is the canonical encoding of a run's input: indented JSON of
+// the program, plan and ref, with a trailing newline.
+func InputJSON(in RunInput) ([]byte, error) {
+	b, err := json.MarshalIndent(in, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WorkflowID names a run's workflow after everything it was asked to do:
+// "loom-" plus the Git blob ID of InputJSON. Submitting the exact same
+// program, plan and ref while a run is in progress joins that run; any
+// difference, even a comment in the program, is a different workflow.
+func WorkflowID(ctx context.Context, in RunInput) (string, error) {
+	b, err := InputJSON(in)
 	if err != nil {
 		return "", err
 	}
@@ -254,7 +289,15 @@ func Submit(ctx context.Context, c client.Client, taskQueue string, in RunInput)
 	if err := in.Plan.Validate(); err != nil {
 		return nil, fmt.Errorf("loom: %w", err)
 	}
-	id, err := WorkflowID(ctx, in.Plan)
+	if err := warp.CheckRef(ctx, in.Ref); err != nil {
+		return nil, err
+	}
+	for _, n := range in.Plan.Nodes {
+		if err := warp.ValidName(string(n.ID)); err != nil {
+			return nil, err
+		}
+	}
+	id, err := WorkflowID(ctx, in)
 	if err != nil {
 		return nil, err
 	}

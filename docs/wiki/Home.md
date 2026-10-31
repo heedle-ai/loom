@@ -13,7 +13,7 @@ Every arrow is an existing, tested piece. loom's own code is the composition `Ru
 
 - **Durable runs.** Temporal retries failed steps and survives worker crashes.
 - **A permanent record.** Each run is a commit on `refs/loom/runs`, holding the exact program, the compiled plan and every node's output. Read it with ordinary `git`.
-- **A two-way link.** Each commit's trailers name its Temporal workflow and run. Each workflow is named after the Git ID of its plan.
+- **A two-way link.** Each commit's trailers name its Temporal workflow and run. Each workflow is named after the Git ID of its input.
 - **Checked soundness.** The laws on [Soundness](Soundness) are tests that run on every push.
 
 ## The repos
@@ -29,6 +29,7 @@ Every arrow is an existing, tested piece. loom's own code is the composition `Ru
 
 ## Pages
 
+- [Hello World](Hello-World): is the shipment late? Every piece in one small story
 - [Getting Started](Getting-Started): run a program end to end and inspect it
 - [How It Works](How-It-Works): the workflow, the record format, retries and idempotency
 - [Soundness](Soundness): the laws loom guarantees, and the test behind each

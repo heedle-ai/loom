@@ -1,0 +1,2 @@
+on-time
+Carrier confirms the container is loaded and sailing on schedule.

@@ -33,6 +33,8 @@ go test -race ./...
 
 The tests need no Temporal server: they run the real workflows in Temporal's in-process test suite, against real Git stores in temporary directories.
 
+For a fuller example, see [Hello World](Hello-World).
+
 ## 3. Compile a program (runs nothing)
 
 ```bash
@@ -64,14 +66,14 @@ go run ./cmd/loom run '(pipe (par (echo "a") (echo "b")) echo)'
 ```
 
 ```text
-workflow loom-c9fb904cb1266678057634d4bdb6f45b303f5e99 run <run ID>
+workflow loom-807ad5ae49ffdcead915401c2e8633be94b798ae run <run ID>
 commit   <commit ID> on refs/loom/runs
 n0       a
 n1       b
 n2       a b
 ```
 
-The workflow ID is always the same for this program, because it's the Git ID of the compiled plan. The run ID and commit ID differ per run.
+The workflow ID is always the same for this program and ref, because it's the Git ID of the run's input (program, plan and ref). The run ID and commit ID differ per run.
 
 ## 5. Inspect runs with Git
 
@@ -88,12 +90,12 @@ git --git-dir $S fsck --strict
 After two runs, the log looks like this:
 
 ```text
-5102e44 run loom-11a9c0156802f8997c9bcc0770b2135aca3caeb5
-Shuttle-Workflow: loom-11a9c0156802f8997c9bcc0770b2135aca3caeb5
+5d5738e run loom-e9cc13255d1334447dd36e99e2a181a61b1aa4fd
+Shuttle-Workflow: loom-e9cc13255d1334447dd36e99e2a181a61b1aa4fd
 Shuttle-Run: 0a1b2c3d-run-2
 
-38731d5 run loom-c9fb904cb1266678057634d4bdb6f45b303f5e99
-Shuttle-Workflow: loom-c9fb904cb1266678057634d4bdb6f45b303f5e99
+72d3927 run loom-807ad5ae49ffdcead915401c2e8633be94b798ae
+Shuttle-Workflow: loom-807ad5ae49ffdcead915401c2e8633be94b798ae
 Shuttle-Run: 0a1b2c3d-run-1
 ```
 

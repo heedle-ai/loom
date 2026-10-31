@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/heedle-ai/draft"
@@ -213,7 +214,7 @@ func TestRecord_ConcurrentRunsFormOneLinearHistory(t *testing.T) {
 		t.Errorf("history has %d commits, want %d", count, n)
 	}
 	for i := 0; i < n; i++ {
-		c, ok, _ := s.FindByTrailer(ctx, loom.DefaultRef, loom.TrailerRun, fmt.Sprintf("run-%d", i))
+		c, ok, _ := s.FindByTrailer(ctx, head, loom.TrailerRun, fmt.Sprintf("run-%d", i))
 		if !ok {
 			t.Errorf("run-%d missing from history", i)
 			continue
@@ -224,16 +225,95 @@ func TestRecord_ConcurrentRunsFormOneLinearHistory(t *testing.T) {
 	}
 }
 
-func TestWorkflowID_IsGitIDOfPlan(t *testing.T) {
-	p := compile(t, program)
-	id := must(loom.WorkflowID(ctx, p))
+func TestWorkflowID_IsGitIDOfTheRunInput(t *testing.T) {
+	in := loom.RunInput{Program: program, Plan: compile(t, program), Ref: loom.DefaultRef}
+	id := must(loom.WorkflowID(ctx, in))
 	cmd := exec.Command("git", "hash-object", "--stdin")
-	cmd.Stdin = bytes.NewReader(must(loom.PlanJSON(p)))
+	cmd.Stdin = bytes.NewReader(must(loom.InputJSON(in)))
 	if want := "loom-" + strings.TrimSpace(string(must(cmd.Output()))); id != want {
 		t.Errorf("WorkflowID = %s, want %s", id, want)
 	}
-	if other := must(loom.WorkflowID(ctx, compile(t, `(echo "a")`))); other == id {
-		t.Error("different plans share a workflow ID")
+	// Any difference in what was asked is a different workflow.
+	commented := in
+	commented.Program = "; same plan, different source\n" + program
+	otherRef := in
+	otherRef.Ref = "refs/loom/other"
+	otherPlan := loom.RunInput{Program: `(echo "a")`, Plan: compile(t, `(echo "a")`), Ref: loom.DefaultRef}
+	for name, v := range map[string]loom.RunInput{"comment": commented, "ref": otherRef, "plan": otherPlan} {
+		if must(loom.WorkflowID(ctx, v)) == id {
+			t.Errorf("changing the %s kept the workflow ID", name)
+		}
+	}
+}
+
+func TestRecord_ConcurrentAttemptsOfOneRunRecordItOnce(t *testing.T) {
+	for trial := 0; trial < 15; trial++ {
+		s := newStore(t)
+		must(record(s, "earlier-run", time.Unix(1700000000, 0)))
+		var wg sync.WaitGroup
+		commits := make([]warp.ID, 6)
+		for i := range commits {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for { // Temporal retrying overlapping attempts of the same run
+					c, err := record(s, "run-X", time.Unix(1700000100, 0))
+					if err == nil {
+						commits[i] = c
+						return
+					}
+					if !errors.Is(err, warp.ErrConflict) {
+						t.Errorf("attempt %d: %v", i, err)
+						return
+					}
+				}
+			}(i)
+		}
+		wg.Wait()
+		for _, c := range commits[1:] {
+			if c != commits[0] {
+				t.Fatalf("trial %d: attempts returned different commits %v", trial, commits)
+			}
+		}
+		head, _, _ := s.Resolve(ctx, loom.DefaultRef)
+		n := 0
+		for c := head; c != ""; {
+			for _, tr := range must(s.Trailers(ctx, c)) {
+				if tr.Key == loom.TrailerRun && tr.Value == "run-X" {
+					n++
+				}
+			}
+			_, ps := must2(s.Parents(ctx, c))
+			c = ""
+			if len(ps) > 0 {
+				c = ps[0]
+			}
+		}
+		if n != 1 {
+			t.Fatalf("trial %d: run-X recorded %d times, want 1", trial, n)
+		}
+	}
+}
+
+func TestRun_InvalidNodeNamesFailBeforeRunning(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	loom.Register(env, newStore(t))
+	bad := plan.Plan{Nodes: []plan.Node{{ID: "a/b", Activity: plan.EchoName, Args: []string{"x"}}}}
+	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: "(n/a)", Plan: bad})
+	err := env.GetWorkflowError()
+	if err == nil || !strings.Contains(err.Error(), "tree entry name") {
+		t.Fatalf("err = %v, want an invalid-name error", err)
+	}
+}
+
+func TestRecord_InvalidInputIsNotRetryable(t *testing.T) {
+	r := &loom.Recorder{Store: newStore(t)}
+	_, err := r.Record(ctx, loom.RecordInput{Program: "x", Ref: "not-a-ref", RunID: "r", WorkflowID: "w",
+		Result: plan.Result{Outputs: map[string]string{}}, At: time.Unix(0, 0)})
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() || appErr.Type() != "InvalidInput" {
+		t.Fatalf("err = %v, want non-retryable InvalidInput", err)
 	}
 }
 
