@@ -1,6 +1,7 @@
 **loom**
 
 - [Home](Home)
+- [Hello World](Hello-World)
 - [Getting Started](Getting-Started)
 - [How It Works](How-It-Works)
 - [Soundness](Soundness)

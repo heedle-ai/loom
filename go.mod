@@ -6,6 +6,7 @@ require (
 	github.com/heedle-ai/draft v0.0.0
 	github.com/heedle-ai/shuttle v0.0.0
 	github.com/heedle-ai/warp v0.0.0
+	github.com/heedle-ai/weft v0.0.0
 	go.temporal.io/api v1.62.2
 	go.temporal.io/sdk v1.41.1
 )
@@ -18,7 +19,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
-	github.com/heedle-ai/weft v0.0.0 // indirect
 	github.com/nexus-rpc/sdk-go v0.6.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron v1.2.0 // indirect
