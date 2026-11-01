@@ -48,3 +48,9 @@ jobs:
       - name: test
         working-directory: loom
         run: go test -race ./...
+      - name: invariants
+        working-directory: loom
+        run: bash .github/invariants.sh
+      - name: workflowcheck
+        working-directory: loom
+        run: go run go.temporal.io/sdk/contrib/tools/workflowcheck@v0.6.0 ./...

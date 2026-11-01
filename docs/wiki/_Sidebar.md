@@ -5,6 +5,7 @@
 - [Getting Started](Getting-Started)
 - [How It Works](How-It-Works)
 - [Soundness](Soundness)
+- [Invariants](Invariants)
 - [Contributing](Contributing)
 
 **heedle-ai**

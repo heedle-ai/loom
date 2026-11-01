@@ -1,5 +1,7 @@
 ## The workflow
 
+[[/images/run.svg|alt=String diagram of a run]]
+
 ```go
 func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error)
 ```

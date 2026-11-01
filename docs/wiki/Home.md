@@ -1,13 +1,8 @@
 **loom** is where the heedle-ai pieces run together. It compiles a [draft](https://github.com/heedle-ai/draft/wiki) program, runs it durably with [shuttle](https://github.com/heedle-ai/shuttle/wiki) on Temporal, and records the run in [warp](https://github.com/heedle-ai/warp/wiki) as a Git commit.
 
-```text
- draft source ──draft.Compile──▶ plan ──shuttle PlanWorkflow──▶ outputs ──Record──▶ warp commit
- (pipe (par …) echo)             DAG of      (Temporal child         n0, n1, n2      program.draft
-                                 activities   workflow)                              plan.json
-                                                                                     outputs/…
-```
+[[/images/run.svg|alt=String diagram of a run: the source is copied and compiled; the plan is copied and executed by shuttle on Temporal; program, plan and outputs are recorded in warp; drawdown reads the commit]]
 
-Every arrow is an existing, tested piece. loom's own code is the composition `RunWorkflow = PlanWorkflow >>> Record`, plus a small command-line tool.
+Read it top to bottom: wires carry values, boxes are steps, a dot copies a wire (`Δ`), side by side is `⊗` and one after another is `;`. Every box is an existing, tested piece. loom's own code is the wiring, `RunWorkflow = PlanWorkflow ; Record`, plus a small command-line tool.
 
 ## What you get
 
@@ -33,6 +28,7 @@ Every arrow is an existing, tested piece. loom's own code is the composition `Ru
 - [Getting Started](Getting-Started): run a program end to end and inspect it
 - [How It Works](How-It-Works): the workflow, the record format, retries and idempotency
 - [Soundness](Soundness): the laws loom guarantees, and the test behind each
+- [Invariants](Invariants): every guarantee, the test or check that guards it, and the mistake it came from
 - [Contributing](Contributing)
 
 ## Requirements

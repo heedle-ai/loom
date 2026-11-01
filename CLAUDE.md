@@ -32,7 +32,22 @@ why the existing tool can't do it.
 4. **Bare minimum.** Add only what the task needs. No speculative packages,
    dependencies or abstractions.
 5. **Tests pass before commit:** `go vet ./...` and `go test -race ./...`.
-6. **Confirm soundness after every change.** The laws on the wiki's
+6. **Codify every mistake.** A mistake isn't fixed until it has a row in
+   `docs/wiki/Invariants.md` (ID, invariant, guard, where it came from) and
+   a guard that fails on the old code: a test, a fuzz seed, or a CI step
+   (`ci:NAME`). `bash .github/invariants.sh` checks the page against the
+   code in both directions and runs in CI. Name guard tests `TestLaw_*` or
+   `TestInv_*`; every `Fuzz*` test is a guard. Keep inputs that ever broke a
+   fuzz test in `testdata/fuzz/`.
+7. **Show, don't tell.** Explain structure with string diagrams: SVGs in
+   `docs/wiki/images/` that work in light and dark mode, using `;` for
+   "then" and `⊗` for "side by side". Program diagrams are never drawn by
+   hand: put a generated Mermaid block straight after the program, and the
+   `TestInv_WikiDiagramsMatchPlans` test keeps them identical.
+8. **Get an independent review before significant pushes.** A fresh
+   reviewer that hasn't seen the work tries to break it; every finding
+   becomes an invariant row.
+9. **Confirm soundness after every change.** The laws on the wiki's
    Soundness page are tests (`TestLaw_*`). Run them, and report which hold.
 
 ## Repo-specific
