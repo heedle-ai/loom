@@ -67,7 +67,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, worker.Options{})
-		loom.Register(w, s)
+		loom.Register(w, s, draft.DefaultRegistry())
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 

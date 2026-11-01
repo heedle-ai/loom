@@ -6,12 +6,12 @@
 func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error)
 ```
 
-1. Check the input before anything runs: every node ID must be a valid Git tree entry name (`warp.ValidName`, no I/O), and the ref must pass `git check-ref-format` (run as a Temporal local activity). Otherwise fail at once with the non-retryable error type `InvalidInput`. An empty ref means `refs/loom/runs`.
+1. Check the input before anything runs. Every node ID must be a valid Git tree entry name (`warp.ValidName`, no I/O). Then the **`Check`** local activity verifies that the ref passes `git check-ref-format` and that the program, compiled with the worker's registry, gives exactly `in.Plan` (compared as `PlanJSON`). Bad names or refs fail at once with the non-retryable error type `InvalidInput`; a plan the program doesn't compile to fails with `ProgramPlanMismatch`. A client can't record a plan its program didn't produce. An empty ref means `refs/loom/runs`.
 2. Run `in.Plan` as shuttle's `PlanWorkflow`, as a **child workflow** with ID `<run workflow ID>/plan`. loom doesn't wrap or change it.
 3. Run the **`Record`** activity with the program, plan, results, ref, the Temporal workflow and run IDs, and `workflow.Now`.
 4. Return the outputs and the commit ID.
 
-`RunWorkflow` uses only Temporal workflow APIs, so it replays deterministically. All Git I/O happens inside `Record`.
+`RunWorkflow` uses only Temporal workflow APIs, so it replays deterministically. All Git I/O happens inside `Check` and `Record`; `TestInv_WorkflowsDoNoIO` keeps it that way.
 
 ## The record
 
@@ -75,7 +75,7 @@ On the worker:
 ```go
 store, err := warp.Init(ctx, "/path/to/store.git")
 w := worker.New(temporalClient, "loom", worker.Options{})
-loom.Register(w, store)   // PlanWorkflow, Echo, RunWorkflow, Record
+loom.Register(w, store, draft.DefaultRegistry()) // PlanWorkflow, Echo, RunWorkflow, Check, Record
 ```
 
-To add commands, register them with draft and the worker as described in [draft → Adding Commands](https://github.com/heedle-ai/draft/wiki/Adding-Commands), passing your registry to `loom.Compile`. The `loom` command-line tool uses `draft.DefaultRegistry()`, which has `echo` only.
+To add commands, register them with draft and the worker as described in [draft → Adding Commands](https://github.com/heedle-ai/draft/wiki/Adding-Commands), passing the same registry to `loom.Compile` and `loom.Register`: the worker recompiles every program with it to check the plan. The `loom` command-line tool uses `draft.DefaultRegistry()`, which has `echo` only.

@@ -11,6 +11,7 @@
 package loom
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,8 @@ const (
 	RunWorkflowName = "LoomRun"
 	// RecordName is the registered name of the Record activity.
 	RecordName = "LoomRecord"
+	// CheckName is the registered name of the Check local activity.
+	CheckName = "LoomCheck"
 	// DefaultRef is the warp ref runs are appended to unless told otherwise.
 	DefaultRef = "refs/loom/runs"
 
@@ -82,10 +85,12 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 			return RunResult{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
 		}
 	}
-	// Checking the ref needs git, so it's a local activity, run before the
-	// plan so a bad ref costs nothing.
+	// Check the ref (needs git) and that the program really compiles to
+	// this plan (needs the registry) before running anything, so a record
+	// can never pair a program with a plan it didn't produce. It's a local
+	// activity: quick, and recorded in history like any other.
 	check := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{StartToCloseTimeout: 10 * time.Second})
-	if err := workflow.ExecuteLocalActivity(check, CheckRef, in.Ref).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteLocalActivity(check, CheckName, in).Get(ctx, nil); err != nil {
 		return RunResult{}, err
 	}
 
@@ -126,11 +131,33 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 	return RunResult{Commit: commit, Outputs: res.Outputs, Leaves: res.Leaves}, nil
 }
 
-// CheckRef is a local activity: it fails with the non-retryable error type
-// "InvalidInput" unless ref is a valid full ref name (git check-ref-format).
-func CheckRef(ctx context.Context, ref string) error {
-	if err := warp.CheckRef(ctx, ref); err != nil {
+// Checker is the local activity RunWorkflow runs first.
+type Checker struct {
+	Registry *registry.Registry
+}
+
+// Check fails with the non-retryable error type "InvalidInput" unless
+// in.Ref is a valid full ref name (git check-ref-format), and with
+// "ProgramPlanMismatch" unless in.Program compiles, with this worker's
+// registry, to exactly in.Plan.
+func (c *Checker) Check(ctx context.Context, in RunInput) error {
+	if err := warp.CheckRef(ctx, in.Ref); err != nil {
 		return temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+	}
+	p, err := Compile(ctx, c.Registry, in.Program)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError("program doesn't compile on this worker: "+err.Error(), "ProgramPlanMismatch", err)
+	}
+	want, err := PlanJSON(p)
+	if err != nil {
+		return err
+	}
+	got, err := PlanJSON(in.Plan)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(want, got) {
+		return temporal.NewNonRetryableApplicationError("the plan isn't what the program compiles to", "ProgramPlanMismatch", nil)
 	}
 	return nil
 }
@@ -256,11 +283,13 @@ func PlanJSON(p plan.Plan) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// Register adds shuttle's PlanWorkflow and Echo, RunWorkflow, and Record
-// (writing to store) to a worker.
-func Register(w plan.Registry, store *warp.Store) {
+// Register adds shuttle's PlanWorkflow and Echo, RunWorkflow, Check
+// (compiling with reg) and Record (writing to store) to a worker. reg must
+// be the registry programs are compiled with.
+func Register(w plan.Registry, store *warp.Store, reg *registry.Registry) {
 	plan.Register(w)
 	w.RegisterWorkflowWithOptions(RunWorkflow, workflow.RegisterOptions{Name: RunWorkflowName})
+	w.RegisterActivityWithOptions((&Checker{Registry: reg}).Check, activity.RegisterOptions{Name: CheckName})
 	rec := &Recorder{Store: store}
 	w.RegisterActivityWithOptions(rec.Record, activity.RegisterOptions{Name: RecordName})
 }
