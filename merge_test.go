@@ -1,6 +1,7 @@
 package loom_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -612,4 +613,37 @@ func gitOut(t *testing.T, s *warp.Store, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// countingHistory counts blob reads.
+type countingHistory struct {
+	*warp.Store
+	blob, blobs int
+}
+
+func (c *countingHistory) Blob(ctx context.Context, id warp.ID) ([]byte, error) {
+	c.blob++
+	return c.Store.Blob(ctx, id)
+}
+
+func (c *countingHistory) Blobs(ctx context.Context, ids []warp.ID) ([][]byte, error) {
+	c.blobs++
+	return c.Store.Blobs(ctx, ids)
+}
+
+// TestInv_IndexIsReadInOneCall: every Record reads the beliefs index, which
+// holds every question ever asked, so it is read with one Blobs call however
+// many questions it holds. (drawdown CI on macOS: one Blob per entry made
+// record N cost 2N git processes.)
+func TestInv_IndexIsReadInOneCall(t *testing.T) {
+	h := newHist(t)
+	const n = 30
+	for i := 0; i < n; i++ {
+		h.ask("refs/loom/a", fmt.Sprintf("q%d", i), "1")
+	}
+	c := &countingHistory{Store: h.s}
+	runs := must(loom.ReadIndex(ctx, c, h.head("refs/loom/a")))
+	if len(runs) != n || c.blob != 0 || c.blobs != 1 {
+		t.Errorf("index of %d questions: %d read, %d Blob and %d Blobs calls; want %d, 0 and 1", n, len(runs), c.blob, c.blobs, n)
+	}
 }
