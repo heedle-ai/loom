@@ -1,11 +1,16 @@
 // Command loom runs draft programs on Temporal and records them in warp.
 //
-//	loom worker  -store DIR                   start a worker
+//	loom worker  -store DIR                    start a worker
 //	loom run     [-ref REF] PROGRAM | -f FILE  compile, run and record a program
 //	loom compile PROGRAM | -f FILE             print the compiled plan; runs nothing
+//	loom branch  -from REF -to REF             start a new history at REF's head
+//	loom merge   -into REF -from REF [-resolve ours|theirs|rerun]
+//	                                           merge one history into another
+//	loom beliefs -store DIR [-ref REF]         print the latest answer to every question
 //
-// worker and run take -address (default localhost:7233) and -queue
-// (default "loom").
+// Programs may use echo and container (a fresh Podman container per step,
+// from heedle-ai/bobbin). worker, run, branch and merge take -address (default localhost:7233) and
+// -queue (default "loom").
 package main
 
 import (
@@ -16,11 +21,14 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/heedle-ai/bobbin"
 	"github.com/heedle-ai/draft"
+	draftregistry "github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/warp"
 )
@@ -29,6 +37,9 @@ const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
   loom compile (PROGRAM | -f FILE)
+  loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
+  loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
+  loom beliefs -store DIR [-ref REF]
 `
 
 func main() {
@@ -48,6 +59,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	store := fs.String("store", "", "warp store directory (a bare Git repository; created if missing)")
 	ref := fs.String("ref", loom.DefaultRef, "warp ref to record runs on")
 	file := fs.String("f", "", "read the program from FILE")
+	from := fs.String("from", "", "branch, merge: the ref to start from or merge in")
+	to := fs.String("to", "", "branch: the new ref")
+	into := fs.String("into", "", "merge: the ref to merge into")
+	resolve := fs.String("resolve", "", "merge: settle conflicting questions with ours, theirs or rerun")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -67,7 +82,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, worker.Options{})
-		loom.Register(w, s, draft.DefaultRegistry())
+		reg := draft.DefaultRegistry()
+		if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
+			return err
+		}
+		loom.Register(w, s, reg)
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 
@@ -76,7 +95,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		p, err := loom.Compile(ctx, draft.DefaultRegistry(), src)
+		p, err := loom.Compile(ctx, registry(), src)
 		if err != nil {
 			return err
 		}
@@ -92,7 +111,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		p, err := loom.Compile(ctx, draft.DefaultRegistry(), src)
+		p, err := loom.Compile(ctx, registry(), src)
 		if err != nil {
 			return err
 		}
@@ -121,9 +140,93 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 
+	case "branch", "merge":
+		if fs.NArg() != 0 {
+			return errors.New("unexpected arguments\n" + usage)
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		if args[0] == "branch" {
+			wr, err := loom.SubmitBranch(ctx, c, *queue, loom.BranchInput{From: *from, To: *to})
+			if err != nil {
+				return err
+			}
+			var head warp.ID
+			if err := wr.Get(ctx, &head); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "%s now at %s (from %s)\n", *to, head, *from)
+			return nil
+		}
+		wr, err := loom.SubmitMerge(ctx, c, *queue, loom.MergeInput{Into: *into, From: *from, Resolve: *resolve})
+		if err != nil {
+			return err
+		}
+		var res loom.MergeResult
+		if err := wr.Get(ctx, &res); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%s: %s now at %s\n", res.Kind, *into, res.Commit)
+		for _, q := range sortedKeys(res.Resolved) {
+			fmt.Fprintf(out, "resolved %s: %s", q, res.Resolved[q])
+			if c, ok := res.RerunCommits[q]; ok {
+				fmt.Fprintf(out, " (new run %s)", c)
+			}
+			fmt.Fprintln(out)
+		}
+		return nil
+
+	case "beliefs":
+		if *store == "" || fs.NArg() != 0 {
+			return errors.New("beliefs needs -store DIR\n" + usage)
+		}
+		s, err := warp.Open(ctx, *store)
+		if err != nil {
+			return err
+		}
+		head, ok, err := s.Resolve(ctx, *ref)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("ref %s doesn't exist", *ref)
+		}
+		bs, err := loom.Beliefs(ctx, s, head)
+		if err != nil {
+			return err
+		}
+		for _, b := range bs {
+			line, _, _ := strings.Cut(strings.TrimSpace(b.Program), "\n")
+			fmt.Fprintf(out, "%.14s  %s\n", b.Question, line)
+			for _, id := range sortedKeys(b.Outputs) {
+				fmt.Fprintf(out, "  %-6s %s\n", id, strings.ReplaceAll(strings.TrimRight(b.Outputs[id], "\n"), "\n", "\n         "))
+			}
+		}
+		return nil
+
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
+}
+
+// registry is the commands programs may use: draft's echo, and bobbin's
+// container, which runs each step in a fresh Podman container.
+func registry() *draftregistry.Registry {
+	reg := draft.DefaultRegistry()
+	reg.MustRegister(bobbin.BuiltinSpec())
+	return reg
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 // program returns the source from -f FILE or the single positional argument.

@@ -15,7 +15,9 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | Compilation | `draft.Compile` | A function from syntax to plans |
 | Interpretation | shuttle `PlanWorkflow` | Runs a plan's DAG; independent nodes run in parallel |
 | Record | warp commit | Immutable, content-addressed evidence of one run |
-| History | warp ref | A chain of commits; the ref moves only forward |
+| History | warp ref | A DAG of commits; the ref moves only forward |
+| Branch | another warp ref | A history started from another's head |
+| Merge | a commit with two parents | The union of two histories; beliefs merged per question by Git's three-way merge |
 
 ## Laws that hold
 
@@ -32,6 +34,9 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | 9 | **Recording is idempotent and unambiguous:** re-recording a run returns the same commit; a run ID can't record two different contents; overlapping attempts of one run record it exactly once | loom `TestRecord_Idempotent`, `TestRecord_SameRunDifferentContentIsRejected`, `TestRecord_ConcurrentAttemptsOfOneRunRecordItOnce` |
 | 10 | **Evidence is traceable with Git:** between two runs of the same program, `git diff` lists exactly the outputs whose evidence changed | loom `TestHello_EvidenceChangesAndGitShowsWhy` |
 | 11 | **Records are honest:** a record's plan is always what its program compiles to. The diagram's `compile` wire holds even when a client sends the plan, because the worker recompiles and refuses a mismatch | loom `TestRun_ForgedPlanIsRejected` |
+| 12 | **Merge is the union of histories:** every run of both sides stays in the history, and the merged beliefs are exactly both sides' questions, each answered by the three-way rule (one side changed: that side; both changed differently: the chosen resolution) | loom `TestLaw_MergeIsUnionOfHistories`, warp `TestLaw_MergeTreesIsThreeWayMerge` |
+| 13 | **Merge is commutative, associative and idempotent** on beliefs: A + B = B + A (ours on one side is theirs on the other), (A + B) + C = A + (B + C) without conflicts, and merging what's already merged changes nothing | loom `TestLaw_MergeIsCommutative`, `TestLaw_MergeIsAssociative`, `TestLaw_MergeIsIdempotent` |
+| 14 | **Every commit's files are a real run,** merges included: a merge commit's `program.draft`, `plan.json` and `outputs/` are its first parent's run | loom `TestLaw_MergeRecordsStaySelfVerifying` |
 
 ## Where the guarantees stop
 
@@ -39,5 +44,5 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 - **Effects are outside the category.** Retries can repeat a side effect. Commands with effects must be idempotent.
 - **`par`'s product is labelled by node ID.** Branches are told apart by the IDs draft assigns (`n0`, `n1`, …), not by position. Join order is whatever the joining command chooses; `echo` uses node-ID string order.
 - **`par` is a product of plans, not of arrows in one process.** Each branch is a separate Temporal activity; the laws above are checked for the shapes in the tests, not proved for every program.
-- **No merge yet.** Every run appends to one linear history. Merging divergent histories needs a merge defined on knowledge, not Git's text merge, and isn't built.
+- **Merges are of whole runs.** A merge never combines two runs into one; a question both sides answered differently is a conflict you resolve. After a criss-cross merge, questions the common ancestors disagree on conflict unless both sides agree. See [Branching and Merging](Branching-and-Merging).
 - **Identity uses SHA-1,** Git's default. That's sound for content heedle-ai writes, but not a defence against deliberately crafted collisions.

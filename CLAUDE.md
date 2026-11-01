@@ -1,7 +1,8 @@
 # loom
 
 Runs draft programs on shuttle and records every run in warp. Part of heedle-ai:
-weft (algebra) → draft (language) → shuttle (execution) → warp (object store) → drawdown (UI);
+weft (algebra) → draft (language) → shuttle (execution) → bobbin (runtime) →
+warp (object store) → drawdown (UI);
 loom runs them together.
 
 ## The first rule: reuse, never rewrite
@@ -54,8 +55,8 @@ why the existing tool can't do it.
 
 - **Composition only.** loom composes draft, shuttle and warp. It must not
   change their behaviour: `TestLaw_LoomAgreesWithShuttle` checks this.
-- **Workflow code is deterministic.** `RunWorkflow` uses only workflow APIs;
-  all warp I/O happens in the `Record` activity.
+- **Workflow code is deterministic.** Workflows use only workflow APIs;
+  all warp I/O happens in activities (`TestInv_WorkflowsDoNoIO`).
 - **Conflicts are retried by Temporal,** not by loops in loom.
 - `go.mod` replaces the heedle-ai modules with `../` checkouts until they are
   published; clone all repos as siblings.

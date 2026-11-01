@@ -43,6 +43,10 @@ const (
 	// Trailer keys on every run commit.
 	TrailerWorkflow = "Shuttle-Workflow"
 	TrailerRun      = "Shuttle-Run"
+
+	// MemoRef is the Temporal memo field Submit sets to the run's ref, so
+	// a UI listing executions can tell which history each one belongs to.
+	MemoRef = "loom-ref"
 )
 
 // RunInput is what RunWorkflow receives.
@@ -102,19 +106,10 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		return RunResult{}, err
 	}
 
-	act := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: time.Minute,
-		// A conflict means another run advanced the ref first; Temporal's
-		// retry re-runs Record, which rebuilds on the new head. Retries are
-		// bounded by time, not attempts, so heavy contention can't exhaust
-		// them; invalid input is non-retryable and fails at once.
-		ScheduleToCloseTimeout: 10 * time.Minute,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    100 * time.Millisecond,
-			BackoffCoefficient: 2,
-			MaximumInterval:    5 * time.Second,
-		},
-	})
+	// A conflict means another writer advanced the ref first; Temporal's
+	// retry re-runs Record, which rebuilds on the new head. Invalid input
+	// is non-retryable and fails at once.
+	act := writeOptions(ctx)
 	rec := RecordInput{
 		Program:    in.Program,
 		Plan:       in.Plan,
@@ -174,6 +169,8 @@ type Recorder struct {
 //	program.draft   the source
 //	plan.json       the compiled plan
 //	outputs/<node>  each node's output
+//	beliefs/<q>     for every question asked so far on this history, the
+//	                run ID of its latest run (see QuestionID and Beliefs)
 //
 // Record is idempotent: if a commit for this Temporal run is already on the
 // ref with the same tree, it returns that commit; with a different tree it
@@ -216,11 +213,16 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	if err != nil {
 		return "", err
 	}
-	tree, err := s.PutTree(ctx, []warp.Entry{
+	runFiles := []warp.Entry{
 		{Name: "program.draft", Kind: warp.KindBlob, ID: program},
 		{Name: "plan.json", Kind: warp.KindBlob, ID: planBlob},
 		{Name: "outputs", Kind: warp.KindTree, ID: outTree},
-	})
+	}
+	runTree, err := s.PutTree(ctx, runFiles)
+	if err != nil {
+		return "", err
+	}
+	question, err := QuestionID(ctx, in.Program, in.Plan)
 	if err != nil {
 		return "", err
 	}
@@ -233,23 +235,45 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		return "", err
 	}
 	var parents []warp.ID
+	var known []warp.Entry // the head's beliefs
 	if exists {
 		done, ok, err := s.FindByTrailer(ctx, head, TrailerRun, in.RunID)
 		if err != nil {
 			return "", err
 		}
 		if ok {
-			doneTree, _, err := s.Parents(ctx, done)
+			doneRun, err := runTreeOf(ctx, s, done)
 			if err != nil {
 				return "", err
 			}
-			if doneTree != tree {
+			if doneRun != runTree {
 				msg := fmt.Sprintf("run %s is already recorded as %s with different content", in.RunID, done)
 				return "", temporal.NewNonRetryableApplicationError(msg, "RecordMismatch", nil)
 			}
 			return done, nil
 		}
 		parents = []warp.ID{head}
+		idx, err := readIndex(ctx, s, head)
+		if err != nil {
+			return "", err
+		}
+		known = idx.entries
+	}
+	// This run is now the belief for its question; every other belief is
+	// carried over unchanged. A belief names its run by run ID, which the
+	// run's commit carries as a trailer, so it always resolves to a commit
+	// in this history (and Git's garbage collection keeps it).
+	belief, err := s.PutBlob(ctx, []byte(in.RunID+"\n"))
+	if err != nil {
+		return "", err
+	}
+	beliefs, err := s.PutTree(ctx, setEntry(known, warp.Entry{Name: question, Kind: warp.KindBlob, ID: belief}))
+	if err != nil {
+		return "", err
+	}
+	tree, err := s.PutTree(ctx, append(runFiles, warp.Entry{Name: BeliefsDir, Kind: warp.KindTree, ID: beliefs}))
+	if err != nil {
+		return "", err
 	}
 
 	commit, err := s.Commit(ctx, warp.CommitSpec{
@@ -284,7 +308,8 @@ func PlanJSON(p plan.Plan) ([]byte, error) {
 }
 
 // Register adds shuttle's PlanWorkflow and Echo, RunWorkflow, Check
-// (compiling with reg) and Record (writing to store) to a worker. reg must
+// (compiling with reg) and Record (writing to store), and BranchWorkflow
+// and MergeWorkflow with their activities, to a worker. reg must
 // be the registry programs are compiled with.
 func Register(w plan.Registry, store *warp.Store, reg *registry.Registry) {
 	plan.Register(w)
@@ -292,6 +317,12 @@ func Register(w plan.Registry, store *warp.Store, reg *registry.Registry) {
 	w.RegisterActivityWithOptions((&Checker{Registry: reg}).Check, activity.RegisterOptions{Name: CheckName})
 	rec := &Recorder{Store: store}
 	w.RegisterActivityWithOptions(rec.Record, activity.RegisterOptions{Name: RecordName})
+	w.RegisterWorkflowWithOptions(BranchWorkflow, workflow.RegisterOptions{Name: BranchWorkflowName})
+	w.RegisterWorkflowWithOptions(MergeWorkflow, workflow.RegisterOptions{Name: MergeWorkflowName})
+	w.RegisterActivityWithOptions(rec.Branch, activity.RegisterOptions{Name: BranchName})
+	w.RegisterActivityWithOptions(rec.Pin, activity.RegisterOptions{Name: PinName})
+	w.RegisterActivityWithOptions(rec.MergePlan, activity.RegisterOptions{Name: MergePlanName})
+	w.RegisterActivityWithOptions(rec.Merge, activity.RegisterOptions{Name: MergeName})
 }
 
 // Compile compiles a draft program against reg.
@@ -351,5 +382,6 @@ func Submit(ctx context.Context, c client.Client, taskQueue string, in RunInput)
 		ID:                       id,
 		TaskQueue:                taskQueue,
 		WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		Memo:                     map[string]any{MemoRef: in.Ref},
 	}, RunWorkflowName, in)
 }
