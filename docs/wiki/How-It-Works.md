@@ -21,7 +21,10 @@ Each run is one commit on the ref (default `refs/loom/runs`):
 program.draft      the source, byte for byte
 plan.json          the compiled plan, canonical JSON
 outputs/<node ID>  each node's output
+beliefs/q-<ID>     the beliefs index: for every question asked on this history, the run ID of its latest run
 ```
+
+The beliefs index is what makes [Branching and Merging](Branching-and-Merging) precise.
 
 The commit message is `run <workflow ID>`, with Git trailers:
 
@@ -78,4 +81,4 @@ w := worker.New(temporalClient, "loom", worker.Options{})
 loom.Register(w, store, draft.DefaultRegistry()) // PlanWorkflow, Echo, RunWorkflow, Check, Record
 ```
 
-To add commands, register them with draft and the worker as described in [draft → Adding Commands](https://github.com/heedle-ai/draft/wiki/Adding-Commands), passing the same registry to `loom.Compile` and `loom.Register`: the worker recompiles every program with it to check the plan. The `loom` command-line tool uses `draft.DefaultRegistry()`, which has `echo` only.
+To add commands, register them with draft and the worker as described in [draft → Adding Commands](https://github.com/heedle-ai/draft/wiki/Adding-Commands), passing the same registry to `loom.Compile` and `loom.Register`: the worker recompiles every program with it to check the plan. The `loom` command-line tool uses `draft.DefaultRegistry()` (`echo`) plus [bobbin](https://github.com/heedle-ai/bobbin/wiki)'s `container`, which runs a step in a fresh Podman container; its worker registers both.

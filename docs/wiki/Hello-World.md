@@ -155,7 +155,7 @@ git --git-dir ~/hello-store.git show refs/loom/runs~2:outputs/n3
 
 `examples/hello/hello_test.go` runs this whole story against a real Git store:
 
-- `TestHello_EvidenceChangesAndGitShowsWhy` runs it three times with changing sources. It checks each output, that history is three commits each on top of the last, that `git diff --name-only` between consecutive runs lists exactly the changed source and the conclusion, that the plan blob is reused, and that `git fsck --strict` passes.
+- `TestHello_EvidenceChangesAndGitShowsWhy` runs it three times with changing sources. It checks each output, that history is three commits each on top of the last, that `git diff --name-only` between consecutive runs lists exactly the changed source, the conclusion and the question's entry in the beliefs index, that the plan blob is reused, and that `git fsck --strict` passes.
 - `TestHello_RunsThroughLoom` runs it through the full `RunWorkflow`.
 - `TestHello_BadSourceNameIsRejected` and `TestHello_SourcesAreStrict` check that sources can't escape their directory, that summary-less sources are read correctly, and that malformed input fails without retrying.
 

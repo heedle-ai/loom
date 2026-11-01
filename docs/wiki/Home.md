@@ -18,6 +18,7 @@ Read it top to bottom: wires carry values, boxes are steps, a dot copies a wire 
 | [weft](https://github.com/heedle-ai/weft/wiki) | Composition algebra: what a step *is* |
 | [draft](https://github.com/heedle-ai/draft/wiki) | Language: how you *write* a computation |
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Durable execution: how the work *ran* |
+| [bobbin](https://github.com/heedle-ai/bobbin/wiki) | A fresh Podman container per agent step |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Content-addressed store: what the system *knows* |
 | [drawdown](https://github.com/heedle-ai/drawdown/wiki) | Web UI: write, run and browse programs and records |
 | **loom** | Runs them together (this repo) |
@@ -27,6 +28,7 @@ Read it top to bottom: wires carry values, boxes are steps, a dot copies a wire 
 - [Hello World](Hello-World): is the shipment late? Every piece in one small story
 - [Getting Started](Getting-Started): run a program end to end and inspect it
 - [How It Works](How-It-Works): the workflow, the record format, retries and idempotency
+- [Branching and Merging](Branching-and-Merging): what-ifs on branches, and merging knowledge without inventing records
 - [Soundness](Soundness): the laws loom guarantees, and the test behind each
 - [Invariants](Invariants): every guarantee, the test or check that guards it, and the mistake it came from
 - [Contributing](Contributing)

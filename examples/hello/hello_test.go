@@ -136,11 +136,20 @@ func TestHello_EvidenceChangesAndGitShowsWhy(t *testing.T) {
 		t.Errorf("history = %q", log)
 	}
 	// Provenance with plain git: exactly the changed source and the
-	// conclusion differ between consecutive runs.
-	if d := w.git("diff", "--name-only", string(c1), string(c2)); d != "outputs/n0\noutputs/n3" {
-		t.Errorf("run 1 -> 2 changed %q, want weather (n0) and the conclusion (n3)", d)
+	// conclusion differ between consecutive runs, plus the beliefs index
+	// entry of this question, which now names the newer run.
+	p, err := loom.Compile(ctx, shipment.Registry(), shipment.Program)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if d := w.git("diff", "--name-only", string(c2), string(c3)); d != "outputs/n2\noutputs/n3" {
+	q, err := loom.QuestionID(ctx, shipment.Program, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := w.git("diff", "--name-only", string(c1), string(c2)); d != "beliefs/"+q+"\noutputs/n0\noutputs/n3" {
+		t.Errorf("run 1 -> 2 changed %q, want the belief, weather (n0) and the conclusion (n3)", d)
+	}
+	if d := w.git("diff", "--name-only", string(c2), string(c3), "--", "outputs"); d != "outputs/n2\noutputs/n3" {
 		t.Errorf("run 2 -> 3 changed %q, want factory (n2) and the conclusion (n3)", d)
 	}
 	// The program and plan didn't change: the same blobs are reused.
