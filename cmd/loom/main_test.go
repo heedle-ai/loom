@@ -31,6 +31,11 @@ func TestCompileCommand(t *testing.T) {
 		!strings.Contains(out.String(), `"activity": "Container"`) {
 		t.Errorf("container program: %v\n%s", err, out.String())
 	}
+	// reed's browse command is available too; its allowlist is in the plan.
+	if err := run(context.Background(), []string{"compile", `(browse "https://a.example/" "cdn.example")`}, &out); err != nil ||
+		!strings.Contains(out.String(), `"activity": "Browse"`) || !strings.Contains(out.String(), `"cdn.example"`) {
+		t.Errorf("browse program: %v\n%s", err, out.String())
+	}
 	for _, bad := range [][]string{nil, {"bogus"}, {"compile"}, {"worker"}} {
 		if err := run(context.Background(), bad, &out); err == nil {
 			t.Errorf("run(%v) succeeded, want usage error", bad)

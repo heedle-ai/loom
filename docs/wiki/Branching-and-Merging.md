@@ -23,6 +23,8 @@ beliefs/q-<ID>     for every question: the run ID of its latest run
 loom branch -from refs/loom/runs -to refs/loom/what-if
 ```
 
+**Sub-agents** are branches named with a dot: `loom branch -from refs/loom/research -to refs/loom/research.web` makes `research.web` a sub-agent of `research`, and [drawdown](https://github.com/heedle-ai/drawdown/wiki/How-It-Works) shows the tree with one browser tab per agent. (Dots, because Git can't hold both `refs/loom/research` and `refs/loom/research/web`.) Merging a sub-agent back is an ordinary merge.
+
 `BranchWorkflow` pins the source's head, then creates the new ref there (warp's create-only compare-and-swap). It never moves an existing ref: if the target already exists at another commit it fails with `BranchExists`. A retry that finds the branch at the pinned head succeeds, even if the source has moved on since. Run on the branch with `loom run -ref refs/loom/what-if …`.
 
 ## Merging
