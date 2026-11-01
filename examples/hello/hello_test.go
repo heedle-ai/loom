@@ -160,7 +160,7 @@ func TestHello_RunsThroughLoom(t *testing.T) {
 	}
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	loom.Register(env, w.store)
+	loom.Register(env, w.store, shipment.Registry())
 	shipment.RegisterCommands(env, w.sources)
 	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: shipment.Program, Plan: p})
 	if err := env.GetWorkflowError(); err != nil {

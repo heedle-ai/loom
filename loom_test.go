@@ -50,7 +50,7 @@ func runLoom(t *testing.T, s *warp.Store, src string) loom.RunResult {
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	loom.Register(env, s)
+	loom.Register(env, s, draft.DefaultRegistry())
 	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: src, Plan: compile(t, src), Ref: loom.DefaultRef})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("RunWorkflow: %v", err)
@@ -300,7 +300,7 @@ func TestRecord_ConcurrentAttemptsOfOneRunRecordItOnce(t *testing.T) {
 func TestRun_InvalidNodeNamesFailBeforeRunning(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	loom.Register(env, newStore(t))
+	loom.Register(env, newStore(t), draft.DefaultRegistry())
 	bad := plan.Plan{Nodes: []plan.Node{{ID: "a/b", Activity: plan.EchoName, Args: []string{"x"}}}}
 	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: "(n/a)", Plan: bad})
 	err := env.GetWorkflowError()
@@ -312,7 +312,7 @@ func TestRun_InvalidNodeNamesFailBeforeRunning(t *testing.T) {
 func TestRun_InvalidRefFailsBeforeRunning(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	loom.Register(env, newStore(t))
+	loom.Register(env, newStore(t), draft.DefaultRegistry())
 	ran := false
 	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
 		if info.ActivityType.Name == plan.EchoName {
@@ -325,6 +325,31 @@ func TestRun_InvalidRefFailsBeforeRunning(t *testing.T) {
 	}
 	if ran {
 		t.Error("the plan ran before the ref was checked")
+	}
+}
+
+// The reviewer's forgery: a record must never pair a program with a plan it
+// didn't produce, and nothing may run when they disagree.
+func TestRun_ForgedPlanIsRejected(t *testing.T) {
+	s := newStore(t)
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	loom.Register(env, s, draft.DefaultRegistry())
+	ran := false
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		if info.ActivityType.Name == plan.EchoName {
+			ran = true
+		}
+	})
+	env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: `(echo "approved")`, Plan: compile(t, `(echo "forged")`)})
+	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), "isn't what the program compiles to") {
+		t.Fatalf("err = %v, want a program/plan mismatch", err)
+	}
+	if ran {
+		t.Error("the forged plan ran")
+	}
+	if _, ok, _ := s.Resolve(ctx, loom.DefaultRef); ok {
+		t.Error("a forged run was recorded")
 	}
 }
 

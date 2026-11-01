@@ -52,7 +52,7 @@ func main() {
 	defer c.Close()
 
 	w := worker.New(c, queue, worker.Options{})
-	loom.Register(w, s)
+	loom.Register(w, s, shipment.Registry())
 	shipment.RegisterCommands(w, *sources)
 	if err := w.Start(); err != nil {
 		log.Fatal(err)
