@@ -1,4 +1,10 @@
-This page states what heedle-ai guarantees, in categorical terms, and names the test behind each claim. "Holds" means the test exists and passes on every push, on Linux amd64, Linux arm64 and Apple Silicon macOS.
+This page states what heedle-ai guarantees, in categorical terms, and names the test behind each claim. [Invariants](Invariants) lists every guard, and CI checks it against the code.
+
+[[/images/run.svg|alt=String diagram of a run: run = Δ ; (id ⊗ (compile ; Δ ; (id ⊗ ⟦–⟧))) ; record]]
+
+[[/images/shipment.svg|alt=String diagram of the shipment program: Δ₃ ; (weather ⊗ carrier ⊗ factory) ; assess]]
+
+Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by side (`par`, `Par`); `Δ` copies a value onto several wires. "Holds" means the test exists and passes on every push, on Linux amd64, Linux arm64 and Apple Silicon macOS.
 
 ## The structure
 
@@ -15,10 +21,10 @@ This page states what heedle-ai guarantees, in categorical terms, and names the 
 
 | # | Law | Test |
 |---|---|---|
-| 1 | **Category laws** for arrows: left and right identity, associativity, the `Map` functor laws, `Pipe` = nested `Compose` | weft `laws_test.go` (property-based, 200 random inputs each) |
+| 1 | **Category laws** for arrows: left and right identity, associativity, the `Map` functor laws, `Pipe` = nested `Compose`, and the product and coproduct laws (`Par(f, g) ; Fst = f`, `Left ; Sum(f, g) = f`) | weft `laws_test.go` (property-based, 200 random inputs each) |
 | 2 | **`pipe` is sequential composition, `par` is a labelled product:** nested programs compile to exactly the expected dependency graph, including fan-out, fan-in and nesting. A joining node receives each branch's output under that branch's node ID | draft `TestPar_*` in `run_test.go` |
 | 3 | **Compiling is a function:** the same source always gives byte-identical plans | loom `TestLaw_CompileIsAFunction` |
-| 4 | **loom adds nothing to execution:** `RunWorkflow = PlanWorkflow >>> Record`, and its outputs equal running the plan with shuttle alone, for every program shape tested | loom `TestLaw_LoomAgreesWithShuttle` |
+| 4 | **loom adds nothing to execution:** `RunWorkflow = PlanWorkflow ; Record`, and its outputs equal running the plan with shuttle alone, for every program shape tested | loom `TestLaw_LoomAgreesWithShuttle` |
 | 5 | **Records are self-verifying:** recompiling a commit's `program.draft` reproduces its `plan.json` byte for byte, and re-running that plan reproduces its outputs | loom `TestLaw_RecordsAreReproducible` |
 | 6 | **History only grows:** each run's commit has the previous head as its parent, so the ref moves only forward | loom `TestLaw_RefOnlyMovesForward`, `TestRecord_ConcurrentRunsFormOneLinearHistory` |
 | 7 | **Identity is content:** equal content has equal IDs; a workflow's ID is the Git ID of its input (program, plan, ref), so any difference in the request is a different workflow | warp `TestBlob_ContentAddressed`, loom `TestWorkflowID_IsGitIDOfTheRunInput` |

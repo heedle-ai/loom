@@ -8,13 +8,26 @@
   (assess "the shipment will be late"))
 ```
 
+```mermaid
+graph LR
+  n0["n0: Source #quot;weather#quot;"]
+  n1["n1: Source #quot;carrier#quot;"]
+  n2["n2: Source #quot;factory#quot;"]
+  n3["n3: Assess #quot;the shipment will be late#quot;"]
+  n0 --> n3
+  n1 --> n3
+  n2 --> n3
+```
+
+[[/images/shipment.svg|alt=String diagram: the input is copied three ways into weather, carrier and factory side by side, which join into assess]]
+
 | Piece | What it does here |
 |---|---|
 | [draft](https://github.com/heedle-ai/draft/wiki) | Compiles the program: `par` gives three independent nodes, and `pipe` makes `assess` wait for all three |
-| [weft](https://github.com/heedle-ai/weft/wiki) | `source` and `assess` are arrows, each built with `Compose` (`read >>> format`, `collect >>> render`) |
+| [weft](https://github.com/heedle-ai/weft/wiki) | `source` and `assess` are arrows, each built with `Compose` (`read ; format`, `collect ; render`) |
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Runs the three sources in parallel on Temporal, then the assessor |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Stores the program, the plan and every output as Git objects in one commit |
-| loom | Composes it all: `RunWorkflow = PlanWorkflow >>> Record` |
+| loom | Composes it all: `RunWorkflow = PlanWorkflow ; Record` |
 | [drawdown](https://github.com/heedle-ai/drawdown/wiki) | The web UI: run it from the browser and see the diff there; or use `git log`, `git show` and `git diff` |
 
 The sources are files in `examples/hello/sources/`. Each is a signal on the first line, exactly `delay` or `on-time`, then an optional one-line summary. Anything else (an unknown signal, a missing file, a symlink, a name outside `[a-z0-9-]`) fails the run at once rather than being guessed at.
