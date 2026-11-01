@@ -1,15 +1,15 @@
-## 1. Install Go, Git and the Temporal CLI
+## 1. Install Go, Git, the GitHub CLI and the Temporal CLI
 
 **macOS (Apple Silicon)**
 
 ```bash
-brew install go git temporal
+brew install go git gh temporal
 ```
 
 **Linux (amd64 or arm64)**
 
 ```bash
-sudo apt-get install -y git        # or: sudo dnf install -y git
+sudo apt-get install -y git gh     # or: sudo dnf install -y git gh
 GO_VERSION=1.24.7
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSLO "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz"
@@ -25,8 +25,10 @@ For the Temporal CLI on Linux, use `brew install temporal` if you have Homebrew,
 The modules refer to each other by relative path until they're published:
 
 ```bash
+gh auth login        # once; bobbin and reed are private
+gh auth setup-git    # lets git clone them with your gh login
 mkdir -p ~/src/heedle-ai && cd ~/src/heedle-ai
-for r in weft draft shuttle warp loom; do git clone https://github.com/heedle-ai/$r.git; done
+for r in weft draft shuttle warp bobbin reed loom; do git clone https://github.com/heedle-ai/$r.git; done
 cd loom
 go test -race ./...
 ```
