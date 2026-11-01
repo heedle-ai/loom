@@ -35,16 +35,20 @@ jobs:
         with:
           repository: heedle-ai/warp
           path: warp
-      - uses: actions/checkout@v4      # private: needs the HEEDLE_CI_TOKEN secret
+      - name: private-bobbin
+        # read-only deploy key on heedle-ai/bobbin
+        uses: actions/checkout@v4
         with:
           repository: heedle-ai/bobbin
           path: bobbin
-          token: ${{ secrets.HEEDLE_CI_TOKEN || github.token }}
-      - uses: actions/checkout@v4      # private: needs the HEEDLE_CI_TOKEN secret
+          ssh-key: ${{ secrets.BOBBIN_DEPLOY_KEY }}
+      - name: private-reed
+        # read-only deploy key on heedle-ai/reed
+        uses: actions/checkout@v4
         with:
           repository: heedle-ai/reed
           path: reed
-          token: ${{ secrets.HEEDLE_CI_TOKEN || github.token }}
+          ssh-key: ${{ secrets.REED_DEPLOY_KEY }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: loom/go.mod
