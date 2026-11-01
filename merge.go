@@ -73,6 +73,7 @@ func QuestionID(ctx context.Context, program string, p plan.Plan) (string, error
 type History interface {
 	Tree(ctx context.Context, id warp.ID) ([]warp.Entry, error)
 	Blob(ctx context.Context, id warp.ID) ([]byte, error)
+	Blobs(ctx context.Context, ids []warp.ID) ([][]byte, error)
 	Parents(ctx context.Context, commit warp.ID) (tree warp.ID, parents []warp.ID, err error)
 	FindByTrailer(ctx context.Context, from warp.ID, key, value string) (warp.ID, bool, error)
 }
@@ -113,15 +114,21 @@ func readIndex(ctx context.Context, s History, commit warp.ID) (index, error) {
 	if idx.entries, err = s.Tree(ctx, idx.tree); err != nil {
 		return idx, err
 	}
-	for _, e := range idx.entries {
+	ids := make([]warp.ID, len(idx.entries))
+	for i, e := range idx.entries {
 		if e.Kind != warp.KindBlob || !questionName.MatchString(e.Name) {
 			return idx, fmt.Errorf("%w: beliefs entry %q in %s", warp.ErrInvalid, e.Name, commit)
 		}
-		b, err := s.Blob(ctx, e.ID)
-		if err != nil {
-			return idx, err
-		}
-		run, rest, _ := strings.Cut(string(b), "\n")
+		ids[i] = e.ID
+	}
+	// One read for the whole index: every Record reads it, and it holds
+	// every question ever asked on the history (LOOM-32).
+	blobs, err := s.Blobs(ctx, ids)
+	if err != nil {
+		return idx, err
+	}
+	for i, e := range idx.entries {
+		run, rest, _ := strings.Cut(string(blobs[i]), "\n")
 		if run == "" || rest != "" || strings.TrimSpace(run) != run {
 			return idx, fmt.Errorf("%w: beliefs entry %s in %s isn't one run ID", warp.ErrInvalid, e.Name, commit)
 		}
