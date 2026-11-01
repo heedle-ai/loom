@@ -35,10 +35,16 @@ jobs:
         with:
           repository: heedle-ai/warp
           path: warp
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4      # private: needs the HEEDLE_CI_TOKEN secret
         with:
           repository: heedle-ai/bobbin
           path: bobbin
+          token: ${{ secrets.HEEDLE_CI_TOKEN || github.token }}
+      - uses: actions/checkout@v4      # private: needs the HEEDLE_CI_TOKEN secret
+        with:
+          repository: heedle-ai/reed
+          path: reed
+          token: ${{ secrets.HEEDLE_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: loom/go.mod

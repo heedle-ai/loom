@@ -8,8 +8,9 @@
 //	                                           merge one history into another
 //	loom beliefs -store DIR [-ref REF]         print the latest answer to every question
 //
-// Programs may use echo and container (a fresh Podman container per step,
-// from heedle-ai/bobbin). worker, run, branch and merge take -address (default localhost:7233) and
+// Programs may use echo, container (a fresh Podman container per step, from
+// heedle-ai/bobbin) and browse (a fresh browser per step, from
+// heedle-ai/reed). worker, run, branch and merge take -address (default localhost:7233) and
 // -queue (default "loom").
 package main
 
@@ -30,11 +31,12 @@ import (
 	"github.com/heedle-ai/draft"
 	draftregistry "github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/loom"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/warp"
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
   loom compile (PROGRAM | -f FILE)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
@@ -63,6 +65,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	to := fs.String("to", "", "branch: the new ref")
 	into := fs.String("into", "", "merge: the ref to merge into")
 	resolve := fs.String("resolve", "", "merge: settle conflicting questions with ours, theirs or rerun")
+	browserImage := fs.String("browser-image", "", "worker: reed browser image ID for the browse command")
+	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -81,9 +85,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
 		}
 		defer c.Close()
-		w := worker.New(c, *queue, worker.Options{})
+		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
 		reg := draft.DefaultRegistry()
 		if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
+			return err
+		}
+		if err := reed.Register(reg, w, reed.Browser{Image: *browserImage, Network: *browserNetwork}); err != nil {
 			return err
 		}
 		loom.Register(w, s, reg)
@@ -212,11 +219,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 }
 
-// registry is the commands programs may use: draft's echo, and bobbin's
-// container, which runs each step in a fresh Podman container.
+// registry is the commands programs may use: draft's echo, bobbin's
+// container (a step in a fresh Podman container) and reed's browse (a page
+// in a fresh browser that may reach only the hosts the program names).
 func registry() *draftregistry.Registry {
 	reg := draft.DefaultRegistry()
 	reg.MustRegister(bobbin.BuiltinSpec())
+	reg.MustRegister(reed.BuiltinSpec())
 	return reg
 }
 
