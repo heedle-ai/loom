@@ -174,10 +174,12 @@ func (s Skills) change(ctx context.Context, in SkillsChange) (treadle.Skill, err
 	return treadle.Skill{}, fmt.Errorf("%w: unknown change %q", treadle.ErrInvalid, in.Op)
 }
 
-// RegisterSkills registers SkillsWorkflow and its activity, changing lib.
+// RegisterSkills registers SkillsWorkflow and its activity, changing lib,
+// and CatalogWorkflow, which lists a repository's skills.
 func RegisterSkills(w plan.Registry, s Skills) {
 	w.RegisterWorkflowWithOptions(SkillsWorkflow, workflow.RegisterOptions{Name: SkillsWorkflowName})
 	w.RegisterActivityWithOptions(s.Change, activity.RegisterOptions{Name: SkillsChangeName})
+	RegisterCatalog(w, s)
 }
 
 // refusal is a library's refusal without the error wrapping it came in.
