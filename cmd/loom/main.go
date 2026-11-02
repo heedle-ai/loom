@@ -37,7 +37,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
   loom compile (PROGRAM | -f FILE)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
@@ -70,6 +70,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
+	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err := pirn.Register(reg, w, claude); err != nil {
 			return err
 		}
-		if err := pirn.RegisterAgent(reg, w, pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage}); err != nil {
+		if err := pirn.RegisterAgent(reg, w, pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry)}); err != nil {
 			return err
 		}
 		loom.Register(w, s, reg)
@@ -263,4 +264,13 @@ func program(fs *flag.FlagSet, file string) (string, error) {
 	default:
 		return "", errors.New("give exactly one of PROGRAM or -f FILE\n" + usage)
 	}
+}
+
+// registryFor is the registry agent files too big for the record go to,
+// or nil (they're skipped) without one.
+func registryFor(repo string) *pirn.Registry {
+	if repo == "" {
+		return nil
+	}
+	return &pirn.Registry{Repo: repo}
 }

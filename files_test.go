@@ -219,3 +219,35 @@ func FuzzStepFiles(f *testing.F) {
 		}
 	})
 }
+
+// TestInv_RegistryFilesArePointers: a step file kept in an OCI registry
+// (pirn's large files) is recorded as a pointer naming the repository,
+// digest and size, never as an empty file; a malformed one is left out.
+func TestInv_RegistryFilesArePointers(t *testing.T) {
+	sum := strings.Repeat("ab", 32)
+	s := newStore(t)
+	c := recordOutputs(t, s, "run-1", map[string]string{"n0": agentOutput(t,
+		pirn.File{Path: "big.bin", Size: 3000000, OCI: "ghcr.io/acme/files", SHA256: sum},
+		pirn.File{Path: "small.txt", Size: 2, Text: "hi"})})
+	tree, _ := must2(s.Parents(ctx, c))
+	files := entry(t, s, tree, loom.FilesDir).ID
+	if got, _ := file(t, s, files, "n0/big.bin"); got != "oci ghcr.io/acme/files@sha256:"+sum+"\nsize 3000000\n" {
+		t.Errorf("pointer %q", got)
+	}
+	for _, bad := range []map[string]any{
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum},
+		{"path": "a", "oci": "ghcr.io/acme/files", "size": 1},
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": "AB", "size": 1},
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum, "size": -1},
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum, "size": 1.5},
+		{"path": "a", "oci": "ghcr.io/acme/files\nsize 0", "sha256": sum, "size": 1},
+		{"path": "a", "oci": "ghcr.io/acme/files:v1", "sha256": sum, "size": 1},
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum, "size": 1, "text": "x"},
+		{"path": "a", "oci": 5, "sha256": sum, "size": 1},
+	} {
+		b, _ := json.Marshal(map[string]any{"files": []any{bad}})
+		if got, _ := loom.StepFiles(string(b)); len(got) != 0 {
+			t.Errorf("%v recorded as %q", bad, got)
+		}
+	}
+}

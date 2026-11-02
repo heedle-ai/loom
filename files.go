@@ -23,7 +23,8 @@ const MaxRecordedFiles = 500
 // StepFiles reads the files a step's output carries, by path. An output
 // carries files when it is a JSON object whose key "files" (exactly) is an
 // array of objects with "path" and either "text" or "base64" (neither is
-// an empty file): the shape of pirn's agent result, whose files are what
+// an empty file), or "oci", "sha256" and "size" for a file kept in an OCI
+// registry, which is recorded as its Pointer: the shape of pirn's agent result, whose files are what
 // the agent left in /work/out. Keys are matched exactly; for a repeated
 // key, the last wins, as in Go's JSON decoding. Any other output carries
 // none.
@@ -31,7 +32,9 @@ const MaxRecordedFiles = 500
 // Each entry is read on its own, and left out (listed in skipped, by path,
 // or "#i" for the i'th entry if it has no path) when:
 //   - it isn't an object with a string path, string text or base64;
-//   - it has both text and base64, or bad base64;
+//   - it has both text and base64, or bad base64; or oci with text or
+//     base64, a repository that isn't host/path in lower case, a sha256
+//     that isn't 64 lower-case hex digits, or no whole, non-negative size;
 //   - a segment of its path is one Git refuses or treats specially: empty,
 //     ".", "..", anything starting ".git" or "git~" in any case (".git",
 //     ".gitmodules", ".gitattributes", NTFS short names), anything with a
@@ -100,12 +103,23 @@ func readEntry(r json.RawMessage) (path string, data []byte, ok bool) {
 	if json.Unmarshal(r, &m) != nil || json.Unmarshal(m["path"], &path) != nil {
 		return "", nil, false
 	}
-	var text, b64 *string
-	if m["text"] != nil && json.Unmarshal(m["text"], &text) != nil || m["base64"] != nil && json.Unmarshal(m["base64"], &b64) != nil {
+	var text, b64, oci *string
+	if m["text"] != nil && json.Unmarshal(m["text"], &text) != nil || m["base64"] != nil && json.Unmarshal(m["base64"], &b64) != nil ||
+		m["oci"] != nil && json.Unmarshal(m["oci"], &oci) != nil {
 		return path, nil, false
 	}
 	if !validPath(path) || text != nil && b64 != nil {
 		return path, nil, false
+	}
+	if oci != nil {
+		// Kept in a registry: record a pointer, never an empty file.
+		var sum string
+		var size int64
+		if text != nil || b64 != nil || !ociRepo.MatchString(*oci) || json.Unmarshal(m["sha256"], &sum) != nil || !sha256Hex.MatchString(sum) ||
+			json.Unmarshal(m["size"], &size) != nil || size < 0 {
+			return path, nil, false
+		}
+		return path, Pointer(*oci, sum, size), true
 	}
 	switch {
 	case b64 != nil:
@@ -117,7 +131,20 @@ func readEntry(r json.RawMessage) (path string, data []byte, ok bool) {
 	return path, []byte{}, true
 }
 
-var ntfsShortName = regexp.MustCompile(`~[0-9]`)
+var (
+	ntfsShortName = regexp.MustCompile(`~[0-9]`)
+	// ociRepo is a repository with no tag or digest, as pirn's Registry
+	// accepts it.
+	ociRepo   = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$`)
+	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// Pointer is what a record holds for a step file kept in an OCI registry
+// (pirn's large files): where it is, and its size. The file itself is
+// fetched with: oras blob fetch --output FILE <repo>@sha256:<hex>
+func Pointer(repo, sum string, size int64) []byte {
+	return []byte(fmt.Sprintf("oci %s@sha256:%s\nsize %d\n", repo, sum, size))
+}
 
 func validPath(p string) bool {
 	for _, seg := range strings.Split(p, "/") {
