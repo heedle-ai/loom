@@ -69,6 +69,19 @@ Shuttle-Run: <Temporal run ID>
 
 The commit time is the workflow's clock at the moment of recording, never the wall clock, so recording the same run twice produces the same commit.
 
+## Changing skills
+
+A worker's skills ([treadle](https://github.com/heedle-ai/treadle/wiki)) change in two ways: `loom skills` on the worker's store, or `SkillsWorkflow` (`loom.ChangeSkills`), which runs one `LoomSkillsChange` activity on a worker. drawdown uses the workflow, since it never writes to the store itself. A change is one of:
+
+| `SkillsChange.Op` | What the worker does |
+|---|---|
+| `import` | `Library.Import(Source)`: from a repository that isn't trusted, the skill waits for review |
+| `add` | `Library.Add(Files)`: a folder given by hand, at most `MaxSkillsChangeBytes` (1 MiB), since it travels as the workflow's input |
+| `approve` | `Library.Approve(Name, Version, Replaces)`: exactly the version reviewed, against the version its diff was from |
+| `reject` | `Library.Reject(Name, Version)` |
+
+A refusal (an invalid skill or source, a repository or branch that isn't there, or nothing waiting for review) fails the workflow at once with a `SkillsRefused` error saying why. Only an import is retried (`SkillsImportAttempts`, twice), since fetching again is harmless; a decision that fails is reported, never made twice. A change has `SkillsTimeout` (7 minutes) from being asked for to done: one that no worker finishes by then is dropped, never made later, after the one who asked has been told it failed. It isn't a draft command, so no program, and no agent, can add or approve a skill. A skill added this way runs at once: each run is checked against the library as it is when the run starts.
+
 ## Naming
 
 | Thing | ID | Why |

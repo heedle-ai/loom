@@ -99,6 +99,8 @@ func TestInv_WorkflowsDoNoIO(t *testing.T) {
 			return n == "Millisecond" || n == "Second" || n == "Minute" || n == "Hour" || n == "Duration"
 		},
 		"github.com/heedle-ai/warp": func(n string) bool { return n == "ID" || n == "ValidName" },
+		// A type and a constant: SkillsWorkflow's result and its timeout.
+		"github.com/heedle-ai/treadle": func(n string) bool { return n == "Skill" || n == "FetchTimeout" },
 	}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)

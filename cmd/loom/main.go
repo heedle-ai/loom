@@ -126,6 +126,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		loom.RegisterWith(w, &loom.Checker{Registry: reg, RegistryFor: func(ctx context.Context, p plan.Plan) (*draftregistry.Registry, error) {
 			return lib.Pinned(ctx, registry(), p)
 		}}, &loom.Recorder{Store: s, Uses: lib.Uses})
+		// Skills change only through a workflow on this worker (drawdown never
+		// writes), never through a program.
+		loom.RegisterSkills(w, lib)
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 
@@ -268,7 +271,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return errors.New("skills takes one of -add, -import, -catalog, -review, -approve, -reject, -trust, -untrust or -trusted; -path only with -import, -branch with -import or -catalog, -replacing only with -approve\n" + usage)
 		}
 		if *catalog != "" {
-			src, err := sourceFor(*catalog, "", *branch)
+			src, err := treadle.SourceFor(*catalog, "", *branch)
 			if err != nil {
 				return err
 			}
@@ -304,7 +307,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			var sk treadle.Skill
 			switch {
 			case *importSkill != "":
-				src, err := sourceFor(*importSkill, *skillPath, *branch)
+				src, err := treadle.SourceFor(*importSkill, *skillPath, *branch)
 				if err != nil {
 					return err
 				}
@@ -586,23 +589,3 @@ func warnSkipped(skipped []error) {
 
 // stdin is where -add - reads a SKILL.md; tests replace it.
 var stdin io.Reader = os.Stdin
-
-// sourceFor reads a skill source from the command line: a GitHub link,
-// which carries its own branch and folder, or a repository URL with
-// -path and -branch.
-func sourceFor(link, path, branch string) (treadle.Source, error) {
-	if !strings.HasPrefix(link, "https://github.com/") {
-		return treadle.Source{Repo: link, Ref: branch, Path: path}, nil
-	}
-	s, err := treadle.ParseGitHub(link)
-	if err != nil {
-		return s, err
-	}
-	if path != "" || branch != "" {
-		if s.Ref != "" || s.Path != "" {
-			return s, errors.New("a GitHub link to a folder carries its own branch and folder: give -path and -branch with the repository's link instead")
-		}
-		s.Ref, s.Path = branch, path
-	}
-	return s, nil
-}

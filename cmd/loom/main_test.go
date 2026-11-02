@@ -173,6 +173,13 @@ func TestWorkerCommandsAreTheRegistry(t *testing.T) {
 	if got, want := strings.Join(reg.Names(), " "), strings.Join(registry().Names(), " "); got != want {
 		t.Errorf("worker commands %s, registry() %s", got, want)
 	}
+	// No program, so no agent, can change skills: no command runs
+	// loom's skills workflow or its activity.
+	for _, name := range reg.Names() {
+		if spec, _ := reg.Lookup(name); spec.AgentID == loom.SkillsChangeName || spec.AgentID == loom.SkillsWorkflowName {
+			t.Errorf("the command %s changes skills", name)
+		}
+	}
 }
 
 // TestImportCommands: loom skills -catalog lists a repository's skills,
