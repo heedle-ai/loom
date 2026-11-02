@@ -95,8 +95,15 @@ A worker's skills ([treadle](https://github.com/heedle-ai/treadle/wiki)) change 
 | `add` | `Library.Add(Files)`: a folder given by hand, at most `MaxSkillsChangeBytes` (1 MiB), since it travels as the workflow's input |
 | `approve` | `Library.Approve(Name, Version, Replaces)`: exactly the version reviewed, against the version its diff was from |
 | `reject` | `Library.Reject(Name, Version)` |
+| `create` | `treadle.Create(Description)` with the worker's agent, then `Library.Propose`: Claude writes a skill and its test, and it waits for review. A worker without an agent image refuses. It has `SkillsCreateTimeout` (22 minutes), as long as an agent step |
 
 A refusal (an invalid skill or source, a repository or branch that isn't there, or nothing waiting for review) fails the workflow at once with a `SkillsRefused` error saying why. Only an import is retried (`SkillsImportAttempts`, twice), since fetching again is harmless; a decision that fails is reported, never made twice. A change has `SkillsTimeout` (7 minutes) from being asked for to done: one that no worker finishes by then is dropped, never made later, after the one who asked has been told it failed. It isn't a draft command, so no program, and no agent, can add or approve a skill. A skill added this way runs at once: each run is checked against the library as it is when the run starts.
+
+## Writing programs
+
+`loom write -store DIR "Read the three shipment sources and tell me if the shipment will be late"` (or **Describe a task** in drawdown's New run) has Claude write the program: a `pirn` ask, its sources the draft language (`Language`) and every command the worker has, each with how to call it and what it does (`BuiltinCommands` for built-in ones, a skill's own description for skills). The answer's program is compiled; one that doesn't compile goes back to Claude with the compiler's error, up to three times (`MaxWriteAttempts`) in all, within five minutes (`WriteTimeout`): a failure isn't retried from the start, so Claude is never asked more. The result is a program and its plan, shown before anything runs: running it is an ordinary `loom run`, or drawdown's Run button. drawdown asks a worker, through `WriteProgramWorkflow`, so Claude's key stays on the worker.
+
+It prints the program, then a line saying how many steps it has and on which attempt it compiled. Save it to a file to run it.
 
 ## Naming
 

@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    # bash -eo pipefail: a failing command in a pipe fails the step
+    # (the default, bash -e, ignores it).
+    shell: bash
+
 jobs:
   test:
     strategy:
@@ -82,3 +88,12 @@ jobs:
       - name: workflowcheck
         working-directory: loom
         run: go run go.temporal.io/sdk/contrib/tools/workflowcheck@v0.6.0 ./...
+      - name: e2e
+        # A real Temporal dev server (StartDevServer downloads the CLI).
+        working-directory: loom
+        env:
+          LOOM_E2E: "1"
+        run: |
+          go test -count=1 -v -run 'TestE2E_' . | tee e2e.log
+          if grep -q -- '--- SKIP' e2e.log; then echo 'a test skipped'; exit 1; fi
+          grep -q -- '--- PASS: TestE2E_ARealServer' e2e.log

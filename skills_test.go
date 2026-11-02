@@ -3,10 +3,14 @@ package loom_test
 import (
 	"context"
 	"errors"
+	"github.com/heedle-ai/pirn"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/client"
@@ -24,7 +28,7 @@ func changeSkills(t *testing.T, lib *treadle.Library, in loom.SkillsChange) (tre
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	loom.RegisterSkills(env, lib)
+	loom.RegisterSkills(env, loom.Skills{Library: lib})
 	env.ExecuteWorkflow(loom.SkillsWorkflowName, in)
 	if err := env.GetWorkflowError(); err != nil {
 		return treadle.Skill{}, err
@@ -110,10 +114,10 @@ func TestInv_SkillsChangesEndOrNeverHappen(t *testing.T) {
 	if !errors.Is(err, treadle.ErrInvalid) || strings.Count(err.Error(), "waiting for review") != 1 || strings.Contains(err.Error(), "SkillsRefused") {
 		t.Errorf("refusal: %v", err)
 	}
-	for op, want := range map[string]int{loom.SkillsImport: loom.SkillsImportAttempts, loom.SkillsApprove: 1, loom.SkillsReject: 1, loom.SkillsAdd: 1} {
+	for op, want := range map[string]int{loom.SkillsImport: loom.SkillsImportAttempts, loom.SkillsApprove: 1, loom.SkillsReject: 1, loom.SkillsAdd: 1, loom.SkillsCreate: 1} {
 		var suite testsuite.WorkflowTestSuite
 		env := suite.NewTestWorkflowEnvironment()
-		loom.RegisterSkills(env, &treadle.Library{Store: newStore(t)})
+		loom.RegisterSkills(env, loom.Skills{Library: &treadle.Library{Store: newStore(t)}})
 		calls := 0
 		env.OnActivity(loom.SkillsChangeName, mock.Anything, mock.Anything).Return(func(context.Context, loom.SkillsChange) (treadle.Skill, error) {
 			calls++
@@ -123,5 +127,44 @@ func TestInv_SkillsChangesEndOrNeverHappen(t *testing.T) {
 		if env.GetWorkflowError() == nil || calls != want {
 			t.Errorf("%s: tried %d times, want %d", op, calls, want)
 		}
+	}
+}
+
+// TestInv_SkillsAreCreatedForReview: a worker with an agent creates a
+// skill from a description, which then waits for review, carrying the
+// description; a worker without one refuses; and creating has the time
+// of an agent step (SkillsCreateTimeout), every other change SkillsTimeout.
+func TestInv_SkillsAreCreatedForReview(t *testing.T) {
+	lib := &treadle.Library{Store: newStore(t)}
+	var described string
+	create := func(_ context.Context, d string) (map[string][]byte, error) {
+		described = d
+		return map[string][]byte{"SKILL.md": []byte("---\nname: csv-sum\ndescription: Sums a column.\n---\nGo.\n")}, nil
+	}
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	loom.RegisterSkills(env, loom.Skills{Library: lib, Create: create})
+	var heartbeat time.Duration
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		heartbeat = info.HeartbeatTimeout
+	})
+	env.ExecuteWorkflow(loom.SkillsWorkflowName, loom.SkillsChange{Op: loom.SkillsCreate, Description: "Sum a column."})
+	// Review 20: creating heartbeats as an agent step does.
+	if heartbeat != pirn.AgentOptions.Heartbeat || loom.SkillsCreateHeartbeat != pirn.AgentOptions.Heartbeat {
+		t.Errorf("creating has heartbeat timeout %v", heartbeat)
+	}
+	var s treadle.Skill
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	env.GetWorkflowResult(&s)
+	if !s.Pending || s.Created != "Sum a column." || described != "Sum a column." {
+		t.Errorf("created %+v (%q)", s, described)
+	}
+	if _, err := changeSkills(t, lib, loom.SkillsChange{Op: loom.SkillsCreate, Description: "x"}); !refused(err) {
+		t.Errorf("a worker without an agent: %v", err)
+	}
+	if loom.ChangeTimeout(loom.SkillsCreate) != loom.SkillsCreateTimeout || loom.ChangeTimeout(loom.SkillsImport) != loom.SkillsTimeout {
+		t.Error("timeouts")
 	}
 }
