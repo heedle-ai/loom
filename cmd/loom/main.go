@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode"
 
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
@@ -45,11 +46,13 @@ const usage = `usage:
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
+  loom skills  -store DIR -create "DESCRIPTION" -agent-image ID
   loom skills  -store DIR (-review NAME | -approve NAME@VERSION [-replacing VERSION] | -reject NAME@VERSION | -trust PREFIX | -untrust PREFIX | -trusted)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
+  loom write   [-store DIR] "DESCRIPTION OF A TASK"
 `
 
 func main() {
@@ -84,6 +87,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	skillPath := fs.String("path", "", "skills: with -import of a repository URL, the skill's folder in it")
 	branch := fs.String("branch", "", "skills: with -import or -catalog of a repository URL, the branch or tag (default: its default branch)")
 	review := fs.String("review", "", "skills: show the import of a skill waiting for review: its files and its diff from the skill's newest version")
+	createSkill := fs.String("create", "", "skills: a description of a skill for Claude to write, with its test, in an agent step (needs ANTHROPIC_API_KEY and -agent-image); it waits for review")
 	replacing := fs.String("replacing", "", "skills: with -approve, the skill's newest version the review showed the diff from (none for a new skill)")
 	reject := fs.String("reject", "", "skills: NAME@VERSION, the reviewed import to turn down")
 	trust := fs.String("trust", "", "skills: a repository URL prefix (such as https://github.com/your-org) whose imports need no review")
@@ -136,7 +140,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}}, &loom.Recorder{Store: s, Uses: lib.Uses})
 		// Skills change only through a workflow on this worker (drawdown never
 		// writes), never through a program.
-		loom.RegisterSkills(w, lib)
+		loom.RegisterSkills(w, loom.Skills{Library: lib, Create: creator(agent)})
+		// The program writer, for drawdown: Claude with this worker's key,
+		// and its commands and newest skills.
+		loom.RegisterWriter(w, loom.Writer{Asker: claude, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
+			return commandsFor(ctx, *store, registry())
+		}})
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 
@@ -238,6 +247,25 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 
+	case "write":
+		if fs.NArg() != 1 {
+			return errors.New("write takes one description, in quotes\n" + usage)
+		}
+		key := os.Getenv("ANTHROPIC_API_KEY")
+		if key == "" {
+			return errors.New("write asks Claude: set ANTHROPIC_API_KEY")
+		}
+		w := loom.Writer{Asker: pirn.Claude{APIKey: key, Model: *askModel}, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
+			return commandsFor(ctx, *store, registry())
+		}}
+		written, err := w.Write(ctx, fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(out, written.Program)
+		fmt.Fprintf(out, "; %d steps, compiled (attempt %d); run it with: loom run -store DIR -f FILE\n", len(written.Plan.Nodes), written.Attempts)
+		return nil
+
 	case "writes":
 		if *workflowID == "" || fs.NArg() != 0 || *approveWrite != "" && *declineWrite != "" {
 			return errors.New("writes needs -workflow ID, and at most one of -approve or -decline\n" + usage)
@@ -279,7 +307,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 	case "skills":
 		set := 0
-		for _, f := range []string{*add, *importSkill, *catalog, *review, *approveWrite, *reject, *trust, *untrust} {
+		for _, f := range []string{*add, *importSkill, *catalog, *review, *approveWrite, *reject, *trust, *untrust, *createSkill} {
 			if f != "" {
 				set++
 			}
@@ -320,6 +348,23 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		lib := &treadle.Library{Store: s}
 		cmd := "loom skills -store " + shellWord(*store)
+		if *createSkill != "" {
+			key := os.Getenv("ANTHROPIC_API_KEY")
+			if key == "" || *agentImage == "" {
+				return errors.New("-create runs an agent step: set ANTHROPIC_API_KEY and give -agent-image")
+			}
+			agent := pirn.Agent{Claude: pirn.Claude{APIKey: key, Model: *askModel}, Runner: bobbin.Runner{}, Image: *agentImage}
+			files, res, err := treadle.Create(ctx, agent.Run, *createSkill)
+			if err != nil {
+				return err
+			}
+			sk, err := lib.Propose(ctx, files, *createSkill, time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "%s\n%s at %s waits for review: %s -review %s\n", printable(strings.TrimSpace(res.Text)), sk.Name, sk.Version, cmd, sk.Name)
+			return nil
+		}
 		if done, err := reviewCommand(ctx, out, lib, cmd, *review, *approveWrite, *replacing, *reject, *trust, *untrust, *trusted); done || err != nil {
 			return err
 		}
@@ -605,6 +650,47 @@ func warnSkipped(skipped []error) {
 	for _, err := range skipped {
 		fmt.Fprintln(os.Stderr, "loom: skill left out:", err)
 	}
+}
+
+// creator creates skills with the worker's agent, if it has an image.
+func creator(a pirn.Agent) func(context.Context, string) (map[string][]byte, error) {
+	if a.Image == "" {
+		return nil
+	}
+	return func(ctx context.Context, description string) (map[string][]byte, error) {
+		a := a
+		a.OnProgress = func(r pirn.AgentResult) { activity.RecordHeartbeat(ctx, len(r.Commands)) }
+		files, _, err := treadle.Create(ctx, a.Run, description)
+		return files, err
+	}
+}
+
+// commandsFor is base with the store's newest skills, and what a program
+// writer is told about each: built-in commands from loom.BuiltinCommands,
+// skills from their own descriptions.
+func commandsFor(ctx context.Context, store string, base *draftregistry.Registry) (*draftregistry.Registry, []loom.Command, error) {
+	known := map[string]loom.Command{}
+	for k, v := range loom.BuiltinCommands {
+		known[k] = v
+	}
+	if store != "" {
+		s, err := warp.Open(ctx, store)
+		if err != nil {
+			return nil, nil, err
+		}
+		lib := &treadle.Library{Store: s}
+		if _, err := lib.AddTo(ctx, base); err != nil {
+			return nil, nil, err
+		}
+		skills, _, err := lib.Skills(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, sk := range skills {
+			known[sk.Name] = loom.Command{Args: "(" + sk.Name + ` "arg" ...)`, About: "A skill: " + sk.Description}
+		}
+	}
+	return base, loom.Commands(base, known), nil
 }
 
 // readConnectors reads a worker's connectors file, if it has one.

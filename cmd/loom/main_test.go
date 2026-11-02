@@ -391,3 +391,42 @@ func TestInv_WritesCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestInv_WriterSeesEveryCommand: loom write and loom skills -create ask
+// Claude, so they need a key (and -create an agent image) and say so; the
+// writer is told about every command the worker has, built-in ones as
+// loom.BuiltinCommands describes them and each skill by its own
+// description.
+func TestInv_WriterSeesEveryCommand(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	var out bytes.Buffer
+	dir := t.TempDir()
+	store := dir + "/store.git"
+	if err := run(context.Background(), []string{"write", "Say hi."}, &out); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("write without a key: %v", err)
+	}
+	if err := run(context.Background(), []string{"skills", "-store", store, "-create", "Sum a column."}, &out); err == nil || !strings.Contains(err.Error(), "-agent-image") {
+		t.Errorf("create without a key or image: %v", err)
+	}
+	os.MkdirAll(dir+"/triage", 0o755)
+	os.WriteFile(dir+"/triage/SKILL.md", []byte("---\nname: triage\ndescription: Triages bugs by severity.\n---\nGo.\n"), 0o644)
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", dir + "/triage"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	reg, cmds, err := commandsFor(context.Background(), store, registry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	about := map[string]string{}
+	for _, c := range cmds {
+		about[c.Name] = c.About
+	}
+	for _, name := range reg.Names() {
+		if about[name] == "" || about[name] == "A command this worker has." {
+			t.Errorf("the writer isn't told what %s does", name)
+		}
+	}
+	if about["triage"] != "A skill: Triages bugs by severity." {
+		t.Errorf("triage: %q", about["triage"])
+	}
+}
