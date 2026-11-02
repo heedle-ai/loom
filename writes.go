@@ -94,6 +94,11 @@ func QueuedWrites(p plan.Plan, res plan.Result) []WriteOutcome {
 	return out
 }
 
+// queuedWrites is QueuedWrites as RunWorkflow's local activity.
+func queuedWrites(_ context.Context, p plan.Plan, res plan.Result) ([]WriteOutcome, error) {
+	return QueuedWrites(p, res), nil
+}
+
 // runWrites waits for decisions on the writes that need them, then runs
 // every approved write once, in order.
 func runWrites(ctx workflow.Context, writes []WriteOutcome) []WriteOutcome {
@@ -122,13 +127,11 @@ func runWrites(ctx workflow.Context, writes []WriteOutcome) []WriteOutcome {
 		for waiting() > 0 && !expired {
 			sel := workflow.NewSelector(ctx)
 			sel.AddReceive(decisions, func(c workflow.ReceiveChannel, _ bool) {
-				// Read any payload, then decode it here: a payload that
-				// isn't a WriteDecision is ignored, never left blocking the
-				// wait, so expiry still comes (review 19).
-				var raw any
-				c.Receive(ctx, &raw)
+				// ReceiveAsync skips a payload that isn't a WriteDecision
+				// and never blocks, so expiry still comes (review 19:
+				// Receive waited on past a malformed one).
 				var d WriteDecision
-				if b, err := json.Marshal(raw); err != nil || json.Unmarshal(b, &d) != nil {
+				if !c.ReceiveAsync(&d) {
 					return
 				}
 				for i := range writes {

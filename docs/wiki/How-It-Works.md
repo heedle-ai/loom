@@ -71,7 +71,7 @@ The commit time is the workflow's clock at the moment of recording, never the wa
 
 ## Writes
 
-An agent step granted a connector's write tool (such as sending an email) never runs it: it queues it ([pirn → Connectors](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors)). After the plan's steps, `RunWorkflow` takes the queued writes from the agent steps' outputs, in plan order (`QueuedWrites`): only from steps whose activity is pirn's `Agent`, and only writes the step's own arguments granted; any other is `refused`, never run.
+An agent step granted a connector's write tool (such as sending an email) never runs it: it queues it ([pirn → Connectors](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors)). After the plan's steps, `RunWorkflow` takes the queued writes from the agent steps' outputs, in plan order (`QueuedWrites`, run as a local activity, so workflow code decodes no JSON): only from steps whose activity is pirn's `Agent`, and only writes the step's own arguments granted; any other is `refused`, never run.
 
 | Status | Meaning |
 |---|---|
