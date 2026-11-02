@@ -56,7 +56,7 @@ func TestE2E_ARealServer(t *testing.T) {
 		sent = append(sent, wr)
 		return pirn.WriteResult{Output: "sent"}, nil
 	}, activity.RegisterOptions{Name: pirn.WriteActivityName})
-	loom.RegisterWriter(w, writer(&scripted{replies: []string{"```\n(pipe (echo \"a\") (triage \"x\"))\n```"}}))
+	loom.RegisterWriter(w, writer(&scripted{replies: []string{"```\n(pipe (echo \"a\") echo)\n```"}}))
 	lib := &treadle.Library{Store: newStore(t)}
 	loom.RegisterSkills(w, loom.Skills{Library: lib, Create: func(ctx context.Context, desc string) (map[string][]byte, error) {
 		return map[string][]byte{"SKILL.md": []byte("---\nname: triage\ndescription: Triages bugs.\n---\nTriage.\n")}, nil
@@ -95,7 +95,7 @@ func TestE2E_ARealServer(t *testing.T) {
 		t.Fatalf("approved write: %+v %v, sent %+v", res.Writes, err, sent)
 	}
 
-	wr, err := loom.WriteProgram(c0, c, queue, "Triage the bugs.")
+	wr, err := loom.WriteProgram(c0, c, queue, "Say a, then pass it on.")
 	if err != nil || wr.Attempts != 1 || len(wr.Plan.Nodes) != 2 {
 		t.Fatalf("written: %+v %v", wr, err)
 	}
