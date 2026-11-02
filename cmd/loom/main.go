@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -44,6 +45,7 @@ const usage = `usage:
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
+  loom skills  -store DIR (-review NAME | -approve NAME@VERSION [-replacing VERSION] | -reject NAME@VERSION | -trust PREFIX | -untrust PREFIX | -trusted)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
   loom beliefs -store DIR [-ref REF]
@@ -80,6 +82,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	catalog := fs.String("catalog", "", "skills: a GitHub repository link, or an https:// or file:// repository, whose skills to list")
 	skillPath := fs.String("path", "", "skills: with -import of a repository URL, the skill's folder in it")
 	branch := fs.String("branch", "", "skills: with -import or -catalog of a repository URL, the branch or tag (default: its default branch)")
+	review := fs.String("review", "", "skills: show the import of a skill waiting for review: its files and its diff from the skill's newest version")
+	approve := fs.String("approve", "", "skills: NAME@VERSION, the reviewed import to add as the skill's newest version")
+	replacing := fs.String("replacing", "", "skills: with -approve, the skill's newest version the review showed the diff from (none for a new skill)")
+	reject := fs.String("reject", "", "skills: NAME@VERSION, the reviewed import to turn down")
+	trust := fs.String("trust", "", "skills: a repository URL prefix (such as https://github.com/your-org) whose imports need no review")
+	untrust := fs.String("untrust", "", "skills: a trusted prefix to remove; later imports from it wait for review")
+	trusted := fs.Bool("trusted", false, "skills: list the trusted prefixes")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -247,13 +256,16 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 	case "skills":
 		set := 0
-		for _, f := range []string{*add, *importSkill, *catalog} {
+		for _, f := range []string{*add, *importSkill, *catalog, *review, *approve, *reject, *trust, *untrust} {
 			if f != "" {
 				set++
 			}
 		}
-		if set > 1 || (*skillPath != "" && *importSkill == "") || (*branch != "" && *importSkill == "" && *catalog == "") {
-			return errors.New("skills takes one of -add, -import or -catalog; -path only with -import, -branch with -import or -catalog\n" + usage)
+		if *trusted {
+			set++
+		}
+		if set > 1 || (*skillPath != "" && *importSkill == "") || (*branch != "" && *importSkill == "" && *catalog == "") || (*replacing != "" && *approve == "") {
+			return errors.New("skills takes one of -add, -import, -catalog, -review, -approve, -reject, -trust, -untrust or -trusted; -path only with -import, -branch with -import or -catalog, -replacing only with -approve\n" + usage)
 		}
 		if *catalog != "" {
 			src, err := sourceFor(*catalog, "", *branch)
@@ -269,10 +281,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			}
 			for _, e := range entries {
 				if e.Problem != "" {
-					fmt.Fprintf(out, "%-28s can't be imported: %s\n", e.Source.Path, e.Problem)
+					fmt.Fprintf(out, "%-28s can't be imported: %s\n", printable(e.Source.Path), printable(e.Problem))
 					continue
 				}
-				fmt.Fprintf(out, "%-28s %s: %s\n", e.Source.Path, e.Name, e.Description)
+				fmt.Fprintf(out, "%-28s %s: %s\n", printable(e.Source.Path), e.Name, printable(e.Description))
 			}
 			return nil
 		}
@@ -284,6 +296,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		lib := &treadle.Library{Store: s}
+		cmd := "loom skills -store " + shellWord(*store)
+		if done, err := reviewCommand(ctx, out, lib, cmd, *review, *approve, *replacing, *reject, *trust, *untrust, *trusted); done || err != nil {
+			return err
+		}
 		if *add != "" || *importSkill != "" {
 			var sk treadle.Skill
 			switch {
@@ -315,6 +331,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 					return err
 				}
 			}
+			if sk.Pending {
+				fmt.Fprintf(out, "%s at %s waits for review: %s -review %s\n", sk.Name, sk.Version, cmd, sk.Name)
+				return nil
+			}
 			fmt.Fprintf(out, "added %s at %s\n", sk.Name, sk.Version)
 			return nil
 		}
@@ -324,13 +344,141 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		warnSkipped(bad)
 		for _, sk := range skills {
-			fmt.Fprintf(out, "%-20s %.12s  %s\n", sk.Name, sk.Version, sk.Description)
+			fmt.Fprintf(out, "%-20s %.12s  %s\n", sk.Name, sk.Version, printable(sk.Description))
+		}
+		pending, bad, err := lib.Pending(ctx)
+		if err != nil {
+			return err
+		}
+		warnSkipped(bad)
+		if len(pending) > 0 {
+			fmt.Fprintf(out, "waiting for review (%s -review NAME):\n", cmd)
+			for _, sk := range pending {
+				fmt.Fprintf(out, "%-20s %.12s  %s\n", sk.Name, sk.Version, printable(sk.Description))
+			}
 		}
 		return nil
 
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
+}
+
+// reviewCommand runs loom skills -review, -approve, -reject, -trust,
+// -untrust or -trusted, if one is given, and reports whether it did.
+func reviewCommand(ctx context.Context, out io.Writer, lib *treadle.Library, cmd, review, approve, replacing, reject, trust, untrust string, trusted bool) (bool, error) {
+	nameAt := func(flag, v string) (string, warp.ID, error) {
+		name, version, ok := strings.Cut(v, "@")
+		if !ok || name == "" || version == "" {
+			return "", "", fmt.Errorf("-%s takes NAME@VERSION, the version -review showed", flag)
+		}
+		return name, warp.ID(version), nil
+	}
+	switch {
+	case review != "":
+		r, err := lib.Review(ctx, review)
+		if err != nil {
+			return true, err
+		}
+		p := r.Pending
+		fmt.Fprintf(out, "%s at %s, waiting for review\n", p.Name, p.Version)
+		if src := p.Source; src != nil {
+			fmt.Fprintf(out, "  from %s", printable(src.Repo))
+			if src.Path != "" {
+				fmt.Fprintf(out, " folder %s", printable(src.Path))
+			}
+			fmt.Fprintf(out, " at commit %s\n", printable(src.Commit))
+		}
+		approveCmd := fmt.Sprintf("%s -approve %s@%s", cmd, p.Name, p.Version)
+		if r.Replaces != "" {
+			fmt.Fprintf(out, "  replaces %s\n", r.Replaces)
+			approveCmd += " -replacing " + string(r.Replaces)
+		} else {
+			fmt.Fprintln(out, "  a new skill")
+		}
+		fmt.Fprintln(out, "files:")
+		for _, f := range r.Files {
+			fmt.Fprintf(out, "  %10d  %s\n", f.Size, printable(f.Path))
+		}
+		fmt.Fprintf(out, "%s, in full:\n%s", treadle.SkillFile, printable(string(r.SkillMD)))
+		if !strings.HasSuffix(string(r.SkillMD), "\n") {
+			fmt.Fprintln(out)
+		}
+		fmt.Fprintln(out, "diff:")
+		fmt.Fprint(out, printable(string(r.Diff)))
+		if len(r.Binary) > 0 {
+			fmt.Fprintln(out, "not in the diff, because git takes them for binary; read them yourself before approving:")
+			for _, b := range r.Binary {
+				fmt.Fprintf(out, "  %s\n", printable(b))
+			}
+		}
+		fmt.Fprintf(out, "approve: %s\nreject:  %s -reject %s@%s\n", approveCmd, cmd, p.Name, p.Version)
+	case approve != "":
+		name, version, err := nameAt("approve", approve)
+		if err != nil {
+			return true, err
+		}
+		sk, err := lib.Approve(ctx, name, version, warp.ID(replacing), time.Now())
+		if err != nil {
+			return true, err
+		}
+		fmt.Fprintf(out, "approved %s at %s\n", sk.Name, sk.Version)
+	case reject != "":
+		name, version, err := nameAt("reject", reject)
+		if err != nil {
+			return true, err
+		}
+		if err := lib.Reject(ctx, name, version, time.Now()); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(out, "rejected %s at %s\n", name, version)
+	case trust != "":
+		if err := lib.Trust(ctx, trust, time.Now()); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(out, "imports from %s need no review\n", trust)
+	case untrust != "":
+		if err := lib.Untrust(ctx, untrust, time.Now()); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(out, "imports from %s wait for review\n", printable(untrust))
+	case trusted:
+		list, err := lib.Trusted(ctx)
+		if err != nil {
+			return true, err
+		}
+		for _, p := range list {
+			fmt.Fprintln(out, printable(p))
+		}
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+// shellWord is path as one shell word: as it is if that's safe, else
+// single-quoted.
+func shellWord(path string) string {
+	if path != "" && strings.Trim(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/~-") == "" && !strings.HasPrefix(path, "-") && !strings.HasPrefix(path, "~") {
+		return path
+	}
+	return "'" + strings.ReplaceAll(printable(path), "'", `'\''`) + "'"
+}
+
+// printable is text from a skill or its source, safe to print on a
+// terminal: control and format characters (escapes, bidirectional
+// overrides) are shown as \u escapes, never sent as they are; newlines and
+// tabs stay.
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "\uFFFD") {
+		if r == '\n' || r == '\t' || !(unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			b.WriteRune(r)
+		} else {
+			fmt.Fprintf(&b, "\\u%04x", r)
+		}
+	}
+	return b.String()
 }
 
 // registry is the commands programs may use: draft's echo, bobbin's
