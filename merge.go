@@ -476,7 +476,7 @@ func (r *Recorder) MergePlan(ctx context.Context, in MergeRecordInput) ([]Confli
 //
 // Beliefs are whole runs, so a merge never pairs one run's evidence with
 // another's conclusion. The merge commit's own files (program.draft,
-// plan.json, outputs/) are Into's latest run, unchanged.
+// plan.json, outputs/, files/) are Into's latest run, unchanged.
 func (r *Recorder) Merge(ctx context.Context, in MergeRecordInput) (MergeResult, error) {
 	res, err := r.merge(ctx, in)
 	return res, classify(err)

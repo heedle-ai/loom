@@ -12,6 +12,7 @@ Every record carries a **beliefs index**, `beliefs/`: one entry per question eve
 program.draft      this run's source
 plan.json          this run's plan
 outputs/<node ID>  this run's outputs
+files/<node ID>/   the files those outputs carry, if any
 beliefs/q-<ID>     for every question: the run ID of its latest run
 ```
 
@@ -41,7 +42,7 @@ loom merge -into refs/loom/runs -from refs/loom/what-if [-resolve ours|theirs|re
 | The target has nothing the source lacks | The target moves to the source's head (`fast-forward`), no new commit |
 | Both have new runs | A **merge commit** with parents *target head*, *source head* |
 
-A merge commit is the **union** of both histories: every run on either side stays reachable. Its own files (`program.draft`, `plan.json`, `outputs/`) are the target's latest run, unchanged, so every commit's files are still a real run. Its `beliefs/` index is **Git's own three-way merge** (`git merge-tree`, through warp's `MergeTrees`) of the two sides' indexes against their common ancestor's. Each path is a question and each value is one line, a run ID, so Git compares whole runs:
+A merge commit is the **union** of both histories: every run on either side stays reachable. Its own files (`program.draft`, `plan.json`, `outputs/`, and `files/` if the run has one) are the target's latest run, unchanged, so every commit's files are still a real run. Its `beliefs/` index is **Git's own three-way merge** (`git merge-tree`, through warp's `MergeTrees`) of the two sides' indexes against their common ancestor's. Each path is a question and each value is one line, a run ID, so Git compares whole runs:
 
 | Question | Merged belief |
 |---|---|
