@@ -42,6 +42,12 @@ func TestCompileCommand(t *testing.T) {
 		!strings.Contains(out.String(), `"activity": "Ask"`) || !strings.Contains(out.String(), `"Summarize."`) {
 		t.Errorf("ask program: %v\n%s", err, out.String())
 	}
+	// and pirn's agent, with its 20-minute budget in the plan.
+	out.Reset()
+	if err := run(context.Background(), []string{"compile", `(agent "Tidy up.")`}, &out); err != nil ||
+		!strings.Contains(out.String(), `"activity": "Agent"`) || !strings.Contains(out.String(), `"timeout": 1200000000000`) {
+		t.Errorf("agent program: %v\n%s", err, out.String())
+	}
 	for _, bad := range [][]string{nil, {"bogus"}, {"compile"}, {"worker"}} {
 		if err := run(context.Background(), bad, &out); err == nil {
 			t.Errorf("run(%v) succeeded, want usage error", bad)

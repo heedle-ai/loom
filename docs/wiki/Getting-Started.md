@@ -91,7 +91,7 @@ Then in terminal 3:
 go run ./cmd/loom run '(pipe (par (echo "The port is closed.") (echo "The ship sailed on time.")) (ask "Will the cargo be late? Cite the sources."))'
 ```
 
-The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
+The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. For `(agent "…")` steps, where Claude works in a fresh container, also give the worker `-agent-image <image ID>`; see [pirn → Agent steps](https://github.com/heedle-ai/pirn/wiki/How-It-Works#agent-steps). On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
 
 ## 5. Inspect runs with Git
 

@@ -37,7 +37,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
   loom compile (PROGRAM | -f FILE)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
@@ -68,7 +68,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	resolve := fs.String("resolve", "", "merge: settle conflicting questions with ours, theirs or rerun")
 	browserImage := fs.String("browser-image", "", "worker: reed browser image ID for the browse command")
 	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
-	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask uses (key from ANTHROPIC_API_KEY)")
+	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
+	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -95,7 +96,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err := reed.Register(reg, w, reed.Browser{Image: *browserImage, Network: *browserNetwork}); err != nil {
 			return err
 		}
-		if err := pirn.Register(reg, w, pirn.Claude{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: *askModel}); err != nil {
+		claude := pirn.Claude{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: *askModel}
+		if err := pirn.Register(reg, w, claude); err != nil {
+			return err
+		}
+		if err := pirn.RegisterAgent(reg, w, pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage}); err != nil {
 			return err
 		}
 		loom.Register(w, s, reg)
@@ -227,12 +232,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 // registry is the commands programs may use: draft's echo, bobbin's
 // container (a step in a fresh Podman container) and reed's browse (a page
 // in a fresh browser that may reach only the hosts the program names) and
-// pirn's ask (Claude, answering from the step's inputs).
+// pirn's ask (Claude, answering from the step's inputs) and agent (Claude
+// working in a fresh container).
 func registry() *draftregistry.Registry {
 	reg := draft.DefaultRegistry()
 	reg.MustRegister(bobbin.BuiltinSpec())
 	reg.MustRegister(reed.BuiltinSpec())
 	reg.MustRegister(pirn.BuiltinSpec())
+	reg.MustRegister(pirn.AgentBuiltinSpec())
 	return reg
 }
 
