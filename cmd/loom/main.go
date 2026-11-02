@@ -41,7 +41,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
@@ -49,6 +49,7 @@ const usage = `usage:
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
   loom beliefs -store DIR [-ref REF]
+  loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
 `
 
 func main() {
@@ -83,12 +84,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	skillPath := fs.String("path", "", "skills: with -import of a repository URL, the skill's folder in it")
 	branch := fs.String("branch", "", "skills: with -import or -catalog of a repository URL, the branch or tag (default: its default branch)")
 	review := fs.String("review", "", "skills: show the import of a skill waiting for review: its files and its diff from the skill's newest version")
-	approve := fs.String("approve", "", "skills: NAME@VERSION, the reviewed import to add as the skill's newest version")
 	replacing := fs.String("replacing", "", "skills: with -approve, the skill's newest version the review showed the diff from (none for a new skill)")
 	reject := fs.String("reject", "", "skills: NAME@VERSION, the reviewed import to turn down")
 	trust := fs.String("trust", "", "skills: a repository URL prefix (such as https://github.com/your-org) whose imports need no review")
 	untrust := fs.String("untrust", "", "skills: a trusted prefix to remove; later imports from it wait for review")
 	trusted := fs.Bool("trusted", false, "skills: list the trusted prefixes")
+	connectorsFile := fs.String("connectors", "", "worker: a JSON file of the MCP servers agent steps may be granted (tokens by environment variable name)")
+	workflowID := fs.String("workflow", "", "writes: the run's workflow ID, as loom run prints it")
+	approveWrite := fs.String("approve", "", "skills: NAME@VERSION, the reviewed import to add as the skill's newest version; writes: NODE/ID, a write to approve")
+	declineWrite := fs.String("decline", "", "writes: NODE/ID, a write to decline")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -110,7 +114,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		defer c.Close()
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
 		claude := pirn.Claude{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: *askModel}
-		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry)}
+		connectors, err := readConnectors(*connectorsFile)
+		if err != nil {
+			return err
+		}
+		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors}
 		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
@@ -180,6 +188,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(out, "commit   %s on %s\n", res.Commit, *ref)
+		printWrites(out, res.Writes)
 		ids := make([]string, 0, len(res.Outputs))
 		for id := range res.Outputs {
 			ids = append(ids, id)
@@ -229,6 +238,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 
+	case "writes":
+		if *workflowID == "" || fs.NArg() != 0 || *approveWrite != "" && *declineWrite != "" {
+			return errors.New("writes needs -workflow ID, and at most one of -approve or -decline\n" + usage)
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		return writesCommand(ctx, out, c, *workflowID, *approveWrite, *declineWrite)
+
 	case "beliefs":
 		if *store == "" || fs.NArg() != 0 {
 			return errors.New("beliefs needs -store DIR\n" + usage)
@@ -259,7 +279,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 	case "skills":
 		set := 0
-		for _, f := range []string{*add, *importSkill, *catalog, *review, *approve, *reject, *trust, *untrust} {
+		for _, f := range []string{*add, *importSkill, *catalog, *review, *approveWrite, *reject, *trust, *untrust} {
 			if f != "" {
 				set++
 			}
@@ -267,7 +287,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if *trusted {
 			set++
 		}
-		if set > 1 || (*skillPath != "" && *importSkill == "") || (*branch != "" && *importSkill == "" && *catalog == "") || (*replacing != "" && *approve == "") {
+		if set > 1 || (*skillPath != "" && *importSkill == "") || (*branch != "" && *importSkill == "" && *catalog == "") || (*replacing != "" && *approveWrite == "") {
 			return errors.New("skills takes one of -add, -import, -catalog, -review, -approve, -reject, -trust, -untrust or -trusted; -path only with -import, -branch with -import or -catalog, -replacing only with -approve\n" + usage)
 		}
 		if *catalog != "" {
@@ -300,7 +320,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		lib := &treadle.Library{Store: s}
 		cmd := "loom skills -store " + shellWord(*store)
-		if done, err := reviewCommand(ctx, out, lib, cmd, *review, *approve, *replacing, *reject, *trust, *untrust, *trusted); done || err != nil {
+		if done, err := reviewCommand(ctx, out, lib, cmd, *review, *approveWrite, *replacing, *reject, *trust, *untrust, *trusted); done || err != nil {
 			return err
 		}
 		if *add != "" || *importSkill != "" {
@@ -584,6 +604,55 @@ func compileRegistry(ctx context.Context, store string) (*draftregistry.Registry
 func warnSkipped(skipped []error) {
 	for _, err := range skipped {
 		fmt.Fprintln(os.Stderr, "loom: skill left out:", err)
+	}
+}
+
+// readConnectors reads a worker's connectors file, if it has one.
+func readConnectors(path string) (pirn.Connectors, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return pirn.ReadConnectors(f)
+}
+
+// writesCommand lists a run's writes, or approves or declines one
+// ("NODE/ID") and then lists them.
+func writesCommand(ctx context.Context, out io.Writer, c client.Client, wf, approve, decline string) error {
+	if d := approve + decline; d != "" {
+		node, id, ok := strings.Cut(d, "/")
+		if !ok || node == "" || id == "" {
+			return fmt.Errorf("-approve and -decline take NODE/ID, such as n0/w1")
+		}
+		if err := loom.DecideWrite(ctx, c, wf, loom.WriteDecision{Node: node, ID: id, Approve: approve != ""}); err != nil {
+			return err
+		}
+	}
+	ws, err := loom.Writes(ctx, c, wf)
+	if err != nil {
+		return err
+	}
+	if len(ws) == 0 {
+		fmt.Fprintln(out, "no writes (yet: a run's writes are known once its steps are done)")
+	}
+	printWrites(out, ws)
+	return nil
+}
+
+// printWrites lists writes, one per line, then what came of each.
+func printWrites(out io.Writer, ws []loom.WriteOutcome) {
+	for _, w := range ws {
+		fmt.Fprintf(out, "write    %s/%s %s %s/%s %s\n", w.Node, w.ID, w.Status, w.Connector, w.Tool, printable(string(w.Input)))
+		switch {
+		case w.Error != "":
+			fmt.Fprintf(out, "         %s\n", printable(w.Error))
+		case w.Output != "":
+			fmt.Fprintf(out, "         %s\n", printable(strings.ReplaceAll(strings.TrimSpace(w.Output), "\n", "\n         ")))
+		}
 	}
 }
 

@@ -61,6 +61,7 @@ type RunResult struct {
 	Commit  warp.ID           // the warp commit recording this run
 	Outputs map[string]string // every node's output
 	Leaves  []string          // nodes nothing depends on
+	Writes  []WriteOutcome    `json:",omitempty"` // the run's writes, if any
 }
 
 // RecordInput is everything Record writes. At is the workflow's clock, so
@@ -73,6 +74,9 @@ type RecordInput struct {
 	WorkflowID string
 	RunID      string
 	At         time.Time
+	// Writes are the run's queued writes and what came of each; none for
+	// most runs.
+	Writes []WriteOutcome `json:",omitempty"`
 }
 
 // RunWorkflow runs the plan as shuttle's PlanWorkflow, then records the
@@ -98,12 +102,25 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		return RunResult{}, err
 	}
 
+	// The run's writes, while it runs: none until its steps are done.
+	var writes []WriteOutcome
+	if err := workflow.SetQueryHandler(ctx, WritesQuery, func() ([]WriteOutcome, error) { return writes, nil }); err != nil {
+		return RunResult{}, err
+	}
+
 	child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: info.WorkflowExecution.ID + "/plan",
 	})
 	var res plan.Result
 	if err := workflow.ExecuteChildWorkflow(child, plan.WorkflowName, in.Plan).Get(ctx, &res); err != nil {
 		return RunResult{}, err
+	}
+
+	// Each queued write runs once (or never, if it isn't approved), before
+	// the record, which keeps what came of it.
+	writes = QueuedWrites(in.Plan, res)
+	if len(writes) > 0 {
+		writes = runWrites(ctx, writes)
 	}
 
 	// A conflict means another writer advanced the ref first; Temporal's
@@ -118,12 +135,13 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		WorkflowID: info.WorkflowExecution.ID,
 		RunID:      info.WorkflowExecution.RunID,
 		At:         workflow.Now(ctx),
+		Writes:     writes,
 	}
 	var commit warp.ID
 	if err := workflow.ExecuteActivity(act, RecordName, rec).Get(ctx, &commit); err != nil {
 		return RunResult{}, err
 	}
-	return RunResult{Commit: commit, Outputs: res.Outputs, Leaves: res.Leaves}, nil
+	return RunResult{Commit: commit, Outputs: res.Outputs, Leaves: res.Leaves, Writes: writes}, nil
 }
 
 // Checker is the local activity RunWorkflow runs first.
@@ -265,6 +283,17 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 			}
 			runFiles = append(runFiles, warp.Entry{Name: UsesDir, Kind: warp.KindTree, ID: id})
 		}
+	}
+	if len(in.Writes) > 0 {
+		b, err := writesJSON(in.Writes)
+		if err != nil {
+			return "", err
+		}
+		id, err := s.PutBlob(ctx, b)
+		if err != nil {
+			return "", err
+		}
+		runFiles = append(runFiles, warp.Entry{Name: WritesFile, Kind: warp.KindBlob, ID: id})
 	}
 	runTree, err := s.PutTree(ctx, runFiles)
 	if err != nil {

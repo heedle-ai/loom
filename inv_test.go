@@ -99,6 +99,11 @@ func TestInv_WorkflowsDoNoIO(t *testing.T) {
 			return n == "Millisecond" || n == "Second" || n == "Minute" || n == "Hour" || n == "Duration"
 		},
 		"github.com/heedle-ai/warp": func(n string) bool { return n == "ID" || n == "ValidName" },
+		// pirn's pure parsing and names, for a run's queued writes.
+		"github.com/heedle-ai/pirn": func(n string) bool {
+			return n == "ParseAgent" || n == "ParseGrant" || n == "AgentActivityName" || n == "WriteActivityName" || n == "Write" || n == "WriteResult"
+		},
+		"encoding/json": func(n string) bool { return n == "MarshalIndent" || n == "Marshal" || n == "Unmarshal" },
 		// A type and a constant: SkillsWorkflow's result and its timeout.
 		"github.com/heedle-ai/treadle": func(n string) bool { return n == "Skill" || n == "FetchTimeout" },
 	}

@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"github.com/stretchr/testify/mock"
+	"go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/testsuite"
 	"os"
 	"os/exec"
@@ -338,5 +341,53 @@ func TestReviewCommands(t *testing.T) {
 	}
 	if _, err := do("-trust", "file://"+dir, "-review", "pdf"); err == nil {
 		t.Error("two actions at once passed")
+	}
+}
+
+// TestInv_WritesCommand: loom writes lists a run's writes from Temporal
+// (escaping what a tool said), and -approve or -decline NODE/ID signals
+// exactly that decision first; anything else is refused before Temporal
+// is asked.
+func TestInv_WritesCommand(t *testing.T) {
+	c := &mocks.Client{}
+	v := &mocks.Value{}
+	v.On("Get", mock.Anything).Run(func(args mock.Arguments) {
+		*(args.Get(0).(*[]loom.WriteOutcome)) = []loom.WriteOutcome{{Node: "n0", Status: loom.WriteDone, Output: "sent \x1b[2J",
+			Write: pirn.Write{ID: "w1", Connector: "mail", Tool: "send", Input: json.RawMessage(`{"to":"a"}`)}}}
+	}).Return(nil)
+	c.On("QueryWorkflow", mock.Anything, "loom-x", "", loom.WritesQuery).Return(v, nil)
+	var got loom.WriteDecision
+	c.On("SignalWorkflow", mock.Anything, "loom-x", "", loom.WriteSignal, mock.Anything).
+		Run(func(args mock.Arguments) { got = args.Get(4).(loom.WriteDecision) }).Return(nil)
+	var out bytes.Buffer
+	if err := writesCommand(context.Background(), &out, c, "loom-x", "", "n0/w2"); err != nil {
+		t.Fatal(err)
+	}
+	if got != (loom.WriteDecision{Node: "n0", ID: "w2", Approve: false}) {
+		t.Errorf("signalled %+v", got)
+	}
+	if want := "write    n0/w1 done mail/send {\"to\":\"a\"}\n         sent \\u001b[2J\n"; out.String() != want {
+		t.Errorf("got %q, want %q", out.String(), want)
+	}
+	if err := writesCommand(context.Background(), &out, c, "loom-x", "w1", ""); err == nil {
+		t.Error("a decision without NODE/ means nothing")
+	}
+	// A worker's -connectors file is read and checked before it starts.
+	dir := t.TempDir()
+	os.WriteFile(dir+"/ok.json", []byte(`{"connectors":[{"name":"mail","url":"https://mail.example.com/mcp","writes":["send"]}]}`), 0o644)
+	os.WriteFile(dir+"/bad.json", []byte(`{"connectors":[{"name":"mail","url":"http://mail.example.com/mcp"}]}`), 0o644)
+	if cs, err := readConnectors(dir + "/ok.json"); err != nil || len(cs) != 1 {
+		t.Errorf("connectors %+v %v", cs, err)
+	}
+	if _, err := readConnectors(dir + "/bad.json"); err == nil {
+		t.Error("an http:// connector was accepted")
+	}
+	if cs, err := readConnectors(""); err != nil || cs != nil {
+		t.Errorf("no file: %v %v", cs, err)
+	}
+	for _, bad := range [][]string{{"writes"}, {"writes", "-workflow", "x", "-approve", "n0/w1", "-decline", "n0/w1"}} {
+		if err := run(context.Background(), bad, &out); err == nil {
+			t.Errorf("%v succeeded", bad)
+		}
 	}
 }
