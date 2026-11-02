@@ -48,7 +48,7 @@ func refused(err error) bool {
 // an approval or rejection of exactly the version reviewed, or a folder
 // added by hand, at most MaxSkillsChangeBytes; a refusal is final
 // (SkillsRefused) and says why. (That no command runs it is
-// cmd/loom's TestWorkerCommandsAreTheRegistry.)
+// loom/cli's TestWorkerCommandsAreTheRegistry.)
 func TestInv_SkillsChangeThroughAWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(dir+"/SKILL.md", []byte("---\nname: pdf\ndescription: Reads PDFs.\n---\nx\n"), 0o644)

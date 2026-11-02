@@ -1,3 +1,5 @@
+> **One binary:** [heedle](https://github.com/heedle-ai/heedle/wiki) offers every command below (`heedle run`, `heedle compile`, …). loom's command-line tool is also a library, `cli.Run`.
+
 ## 1. Install Go, Git, the GitHub CLI and the Temporal CLI
 
 **macOS (Apple Silicon)**
