@@ -21,8 +21,21 @@ Each run is one commit on the ref (default `refs/loom/runs`):
 program.draft      the source, byte for byte
 plan.json          the compiled plan, canonical JSON
 outputs/<node ID>  each node's output
+files/<node ID>/   the files a node's output carries, as real files (only when some node's does)
 beliefs/q-<ID>     the beliefs index: for every question asked on this history, the run ID of its latest run
 ```
+
+### Step files
+
+An agent step's output lists the files it left in `/work/out` (pirn's agent result). Recording copies each one to `files/<node ID>/<path>` with its exact bytes, so plain Git can show it, list its history and diff it between runs. For a store `$S` whose last two runs had an agent step `n0` that wrote `report.txt`:
+
+```bash
+git --git-dir $S show refs/loom/runs:files/n0/report.txt
+git --git-dir $S log --format='%h %s' refs/loom/runs -- files/n0/report.txt
+git --git-dir $S diff refs/loom/runs~1 refs/loom/runs -- files/
+```
+
+Any output that is a JSON object with a `files` array of `{"path", "text" or "base64"}` is read the same way (`loom.StepFiles`); a file with neither is empty. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored. A file whose path Git can't hold (a `..`, `.` or `.git` segment, an empty one, or a path through another file), a repeated path, or a file with both `text` and `base64` or bad base64, is left out of `files/` and stays in the output. Paths are taken in sorted order, so which one wins is decided by the output alone, and recording never fails because of a step's files. `files/` is derived from the outputs, so a record stays self-verifying: re-running the plan reproduces the outputs, and they reproduce `files/`.
 
 The beliefs index is what makes [Branching and Merging](Branching-and-Merging) precise.
 

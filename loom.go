@@ -169,6 +169,8 @@ type Recorder struct {
 //	program.draft   the source
 //	plan.json       the compiled plan
 //	outputs/<node>  each node's output
+//	files/<node>/   the files a node's output carries (see StepFiles), as
+//	                real files; only when some node's output carries any
 //	beliefs/<q>     for every question asked so far on this history, the
 //	                run ID of its latest run (see QuestionID and Beliefs)
 //
@@ -217,6 +219,13 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		{Name: "program.draft", Kind: warp.KindBlob, ID: program},
 		{Name: "plan.json", Kind: warp.KindBlob, ID: planBlob},
 		{Name: "outputs", Kind: warp.KindTree, ID: outTree},
+	}
+	files, err := filesTree(ctx, s, in.Result.Outputs)
+	if err != nil {
+		return "", err
+	}
+	if files != "" {
+		runFiles = append(runFiles, warp.Entry{Name: FilesDir, Kind: warp.KindTree, ID: files})
 	}
 	runTree, err := s.PutTree(ctx, runFiles)
 	if err != nil {
