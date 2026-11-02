@@ -25,10 +25,10 @@ For the Temporal CLI on Linux, use `brew install temporal` if you have Homebrew,
 The modules refer to each other by relative path until they're published:
 
 ```bash
-gh auth login        # once; bobbin and reed are private
+gh auth login        # once; bobbin, reed and pirn are private
 gh auth setup-git    # lets git clone them with your gh login
 mkdir -p ~/src/heedle-ai && cd ~/src/heedle-ai
-for r in weft draft shuttle warp bobbin reed loom; do git clone https://github.com/heedle-ai/$r.git; done
+for r in weft draft shuttle warp bobbin reed pirn loom; do git clone https://github.com/heedle-ai/$r.git; done
 cd loom
 go test -race ./...
 ```
@@ -76,6 +76,22 @@ n2       a b
 ```
 
 The workflow ID is always the same for this program and ref, because it's the Git ID of the run's input (program, plan and ref). The run ID and commit ID differ per run.
+
+### Ask Claude
+
+The worker also runs pirn's `ask` when it has your Anthropic API key. Restart it in terminal 2 with the key in its environment:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/loom worker -store ~/heedle-store.git
+```
+
+Then in terminal 3:
+
+```bash
+go run ./cmd/loom run '(pipe (par (echo "The port is closed.") (echo "The ship sailed on time.")) (ask "Will the cargo be late? Cite the sources."))'
+```
+
+The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
 
 ## 5. Inspect runs with Git
 

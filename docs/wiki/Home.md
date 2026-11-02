@@ -20,6 +20,7 @@ Read it top to bottom: wires carry values, boxes are steps, a dot copies a wire 
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Durable execution: how the work *ran* |
 | [bobbin](https://github.com/heedle-ai/bobbin/wiki) | A fresh Podman container per agent step |
 | [reed](https://github.com/heedle-ai/reed/wiki) | A fresh browser per browsing step, reaching only the hosts its program names |
+| [pirn](https://github.com/heedle-ai/pirn/wiki) | Claude for agent steps: answers from the step's inputs, recorded with them |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Content-addressed store: what the system *knows* |
 | [drawdown](https://github.com/heedle-ai/drawdown/wiki) | Web UI: write, run and browse programs and records |
 | **loom** | Runs them together (this repo) |

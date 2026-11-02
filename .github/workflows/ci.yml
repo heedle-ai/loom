@@ -49,6 +49,13 @@ jobs:
           repository: heedle-ai/reed
           path: reed
           ssh-key: ${{ secrets.REED_DEPLOY_KEY }}
+      - name: private-pirn
+        # read-only deploy key on heedle-ai/pirn
+        uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/pirn
+          path: pirn
+          ssh-key: ${{ secrets.PIRN_DEPLOY_KEY }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: loom/go.mod
