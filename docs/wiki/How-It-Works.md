@@ -22,6 +22,7 @@ program.draft      the source, byte for byte
 plan.json          the compiled plan, canonical JSON
 outputs/<node ID>  each node's output
 files/<node ID>/   the files a node's output carries, as real files (only when some node's does)
+uses/<name>        the trees the plan's steps use, such as each skill version it pins (only when it uses any)
 beliefs/q-<ID>     the beliefs index: for every question asked on this history, the run ID of its latest run
 ```
 

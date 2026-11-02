@@ -129,17 +129,29 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 // Checker is the local activity RunWorkflow runs first.
 type Checker struct {
 	Registry *registry.Registry
+	// RegistryFor, if set, is the registry a plan's program compiles with,
+	// used instead of Registry: one with the versions of the commands the
+	// plan pins (such as treadle's skills), so a run is checked against
+	// what it was compiled with, not what is newest when it runs.
+	RegistryFor func(context.Context, plan.Plan) (*registry.Registry, error)
 }
 
 // Check fails with the non-retryable error type "InvalidInput" unless
 // in.Ref is a valid full ref name (git check-ref-format), and with
 // "ProgramPlanMismatch" unless in.Program compiles, with this worker's
-// registry, to exactly in.Plan.
+// registry for in.Plan, to exactly in.Plan.
 func (c *Checker) Check(ctx context.Context, in RunInput) error {
 	if err := warp.CheckRef(ctx, in.Ref); err != nil {
 		return temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
 	}
-	p, err := Compile(ctx, c.Registry, in.Program)
+	reg := c.Registry
+	if c.RegistryFor != nil {
+		var err error
+		if reg, err = c.RegistryFor(ctx, in.Plan); err != nil {
+			return temporal.NewNonRetryableApplicationError("the plan's pinned commands aren't on this worker: "+err.Error(), "ProgramPlanMismatch", err)
+		}
+	}
+	p, err := Compile(ctx, reg, in.Program)
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError("program doesn't compile on this worker: "+err.Error(), "ProgramPlanMismatch", err)
 	}
@@ -160,6 +172,11 @@ func (c *Checker) Check(ctx context.Context, in RunInput) error {
 // Recorder holds the warp store the Record activity writes to.
 type Recorder struct {
 	Store *warp.Store
+	// Uses, if set, names the trees a plan's steps use that are already in
+	// Store (such as the skill versions it pins), as entries for the
+	// record's uses/ directory, so a record holds everything it needs to
+	// be checked again, wherever its history is cloned or pushed.
+	Uses func(context.Context, plan.Plan) ([]warp.Entry, error)
 }
 
 // Record writes one run into warp and advances the ref to it.
@@ -171,6 +188,8 @@ type Recorder struct {
 //	outputs/<node>  each node's output
 //	files/<node>/   the files a node's output carries (see StepFiles), as
 //	                real files; only when some node's output carries any
+//	uses/<name>     the trees the plan's steps use (Recorder.Uses), such
+//	                as each skill version it pins; only when it uses any
 //	beliefs/<q>     for every question asked so far on this history, the
 //	                run ID of its latest run (see QuestionID and Beliefs)
 //
@@ -226,6 +245,19 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	}
 	if files != "" {
 		runFiles = append(runFiles, warp.Entry{Name: FilesDir, Kind: warp.KindTree, ID: files})
+	}
+	if r.Uses != nil {
+		uses, err := r.Uses(ctx, in.Plan)
+		if err != nil {
+			return "", err
+		}
+		if len(uses) > 0 {
+			id, err := s.PutTree(ctx, uses)
+			if err != nil {
+				return "", err
+			}
+			runFiles = append(runFiles, warp.Entry{Name: UsesDir, Kind: warp.KindTree, ID: id})
+		}
 	}
 	runTree, err := s.PutTree(ctx, runFiles)
 	if err != nil {
@@ -316,15 +348,24 @@ func PlanJSON(p plan.Plan) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// UsesDir is the record's directory of trees its plan uses.
+const UsesDir = "uses"
+
 // Register adds shuttle's PlanWorkflow and Echo, RunWorkflow, Check
 // (compiling with reg) and Record (writing to store), and BranchWorkflow
 // and MergeWorkflow with their activities, to a worker. reg must
 // be the registry programs are compiled with.
 func Register(w plan.Registry, store *warp.Store, reg *registry.Registry) {
+	RegisterWith(w, &Checker{Registry: reg}, &Recorder{Store: store})
+}
+
+// RegisterWith is Register with a Checker and Recorder of your own: for
+// a worker whose commands are pinned by plans (Checker.RegistryFor) and
+// whose records keep what they use (Recorder.Uses).
+func RegisterWith(w plan.Registry, check *Checker, rec *Recorder) {
 	plan.Register(w)
 	w.RegisterWorkflowWithOptions(RunWorkflow, workflow.RegisterOptions{Name: RunWorkflowName})
-	w.RegisterActivityWithOptions((&Checker{Registry: reg}).Check, activity.RegisterOptions{Name: CheckName})
-	rec := &Recorder{Store: store}
+	w.RegisterActivityWithOptions(check.Check, activity.RegisterOptions{Name: CheckName})
 	w.RegisterActivityWithOptions(rec.Record, activity.RegisterOptions{Name: RecordName})
 	w.RegisterWorkflowWithOptions(BranchWorkflow, workflow.RegisterOptions{Name: BranchWorkflowName})
 	w.RegisterWorkflowWithOptions(MergeWorkflow, workflow.RegisterOptions{Name: MergeWorkflowName})
