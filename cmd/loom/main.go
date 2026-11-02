@@ -246,10 +246,22 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 
 	case "skills":
+		set := 0
+		for _, f := range []string{*add, *importSkill, *catalog} {
+			if f != "" {
+				set++
+			}
+		}
+		if set > 1 || (*skillPath != "" && *importSkill == "") || (*branch != "" && *importSkill == "" && *catalog == "") {
+			return errors.New("skills takes one of -add, -import or -catalog; -path only with -import, -branch with -import or -catalog\n" + usage)
+		}
 		if *catalog != "" {
 			src, err := sourceFor(*catalog, "", *branch)
 			if err != nil {
 				return err
+			}
+			if src.Path != "" {
+				return errors.New("-catalog lists a whole repository: give the repository's link, not a folder's")
 			}
 			entries, err := treadle.Catalog(ctx, src.Repo, src.Ref)
 			if err != nil {
@@ -284,9 +296,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 					return err
 				}
 			case *add == "-":
-				md, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+				md, err := io.ReadAll(io.LimitReader(stdin, treadle.MaxSkillMD+1))
 				if err != nil {
 					return err
+				}
+				if len(md) > treadle.MaxSkillMD {
+					return fmt.Errorf("a pasted SKILL.md is at most %d bytes", treadle.MaxSkillMD)
 				}
 				if sk, err = lib.Add(ctx, map[string][]byte{treadle.SkillFile: md}, time.Now()); err != nil {
 					return err
@@ -428,8 +443,18 @@ var stdin io.Reader = os.Stdin
 // which carries its own branch and folder, or a repository URL with
 // -path and -branch.
 func sourceFor(link, path, branch string) (treadle.Source, error) {
-	if strings.HasPrefix(link, "https://github.com/") && path == "" && branch == "" {
-		return treadle.ParseGitHub(link)
+	if !strings.HasPrefix(link, "https://github.com/") {
+		return treadle.Source{Repo: link, Ref: branch, Path: path}, nil
 	}
-	return treadle.Source{Repo: link, Ref: branch, Path: path}, nil
+	s, err := treadle.ParseGitHub(link)
+	if err != nil {
+		return s, err
+	}
+	if path != "" || branch != "" {
+		if s.Ref != "" || s.Path != "" {
+			return s, errors.New("a GitHub link to a folder carries its own branch and folder: give -path and -branch with the repository's link instead")
+		}
+		s.Ref, s.Path = branch, path
+	}
+	return s, nil
 }

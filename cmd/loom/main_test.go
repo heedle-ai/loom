@@ -206,4 +206,20 @@ func TestImportCommands(t *testing.T) {
 	if err := run(context.Background(), []string{"skills", "-store", store}, &out); err != nil || !strings.Contains(out.String(), "brief") || !strings.Contains(out.String(), "pdf") {
 		t.Errorf("list: %v %s", err, out.String())
 	}
+	// Review 14: a long paste was cut silently, and conflicting or
+	// stray flags were ignored.
+	stdin = strings.NewReader("---\nname: long\ndescription: d\n---\n" + strings.Repeat("x", 1<<20))
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", "-"}, &out); err == nil {
+		t.Error("a pasted SKILL.md over the limit was kept")
+	}
+	for _, bad := range [][]string{
+		{"skills", "-store", store, "-add", "x", "-import", "file://" + repo},
+		{"skills", "-store", store, "-path", "skills/pdf"},
+		{"skills", "-store", store, "-import", "https://github.com/a/b/tree/main/x", "-branch", "v1"},
+		{"skills", "-catalog", "https://github.com/a/b/tree/main/skills"},
+	} {
+		if err := run(context.Background(), bad, &out); err == nil {
+			t.Errorf("%v succeeded", bad)
+		}
+	}
 }
