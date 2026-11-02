@@ -91,7 +91,7 @@ Then in terminal 3:
 go run ./cmd/loom run '(pipe (par (echo "The port is closed.") (echo "The ship sailed on time.")) (ask "Will the cargo be late? Cite the sources."))'
 ```
 
-The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. For `(agent "…")` steps, where Claude works in a fresh container, also give the worker `-agent-image <image ID>`, and `-agent-registry <repository>` to keep files too big for the record in an OCI registry; see [pirn → Agent steps](https://github.com/heedle-ai/pirn/wiki/How-It-Works#agent-steps). On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
+The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. For `(agent "…")` steps, where Claude works in a fresh container, also give the worker `-agent-image <image ID>`, and `-agent-registry <repository>` to keep files too big for the record in an OCI registry. `(image "<Containerfile>")` builds an image ([bobbin → Image builds](https://github.com/heedle-ai/bobbin/wiki/How-It-Works#image-builds)); give the worker `-image-registry <repository>` for `(image … "push")`; see [pirn → Agent steps](https://github.com/heedle-ai/pirn/wiki/How-It-Works#agent-steps). On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
 
 ## 5. Inspect runs with Git
 
