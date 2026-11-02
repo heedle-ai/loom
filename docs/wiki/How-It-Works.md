@@ -35,7 +35,20 @@ git --git-dir $S log --format='%h %s' refs/loom/runs -- files/n0/report.txt
 git --git-dir $S diff refs/loom/runs~1 refs/loom/runs -- files/
 ```
 
-Any output that is a JSON object with a `files` array of `{"path", "text" or "base64"}` is read the same way (`loom.StepFiles`); a file with neither is empty. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored. A file whose path Git can't hold (a `..`, `.` or `.git` segment, an empty one, or a path through another file), a repeated path, or a file with both `text` and `base64` or bad base64, is left out of `files/` and stays in the output. Paths are taken in sorted order, so which one wins is decided by the output alone, and recording never fails because of a step's files. `files/` is derived from the outputs, so a record stays self-verifying: re-running the plan reproduces the outputs, and they reproduce `files/`.
+Any output that is a JSON object whose key `files` (exactly) is an array of `{"path", "text" or "base64"}` objects is read the same way (`loom.StepFiles`); an entry with neither is an empty file. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored.
+
+Each entry is checked on its own; one that fails stays in the output but not in `files/`, and the step's other files are still recorded:
+
+| Left out | Why |
+|---|---|
+| Not an object with a string `path`, and a string `text` or `base64`; both of them; bad base64 | Malformed |
+| A path segment that is empty, `.` or `..`; starts with `.git` or `git~` in any case; has `~` and a digit; ends in `.` or a space; or holds a character macOS ignores in names | Git refuses these, or treats them as `.git` or `.gitmodules` on some systems, and a store holding one fails `git fsck --strict` and can't be pushed |
+| A path listed more than once | Ambiguous: all of them are left out |
+| A path that, ignoring case, matches or runs through an earlier file, or matches an earlier directory (in sorted order) | It couldn't be checked out on macOS's case-insensitive disks |
+
+A record holds at most 500 step files in all (`MaxRecordedFiles`): each costs a git process, and recording must finish well inside its timeout. Past that, files are taken in node order, then path order. Which files are recorded depends only on the set of entries, never their order, so recording never fails because of a step's files, and `files/` is derived from the outputs alone: re-running the plan reproduces the outputs, and they reproduce `files/`. Two names differing only in Unicode normalization (`café` written two ways) are both kept; macOS shows them as one file.
+
+These rules decide what a record holds, so a `Record` retried across an upgrade that changes them, after the first attempt reached Git, fails with `RecordMismatch` rather than writing a different record of the same run.
 
 The beliefs index is what makes [Branching and Merging](Branching-and-Merging) precise.
 
