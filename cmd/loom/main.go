@@ -20,9 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -45,7 +43,7 @@ const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
-  loom skills  -store DIR [-add FOLDER]
+  loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
   loom beliefs -store DIR [-ref REF]
@@ -77,7 +75,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
-	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store")
+	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store, or - for a SKILL.md on standard input")
+	importSkill := fs.String("import", "", "skills: a GitHub link to a skill's folder, or an https:// or file:// repository (with -path and -branch), to import")
+	catalog := fs.String("catalog", "", "skills: a GitHub repository link, or an https:// or file:// repository, whose skills to list")
+	skillPath := fs.String("path", "", "skills: with -import of a repository URL, the skill's folder in it")
+	branch := fs.String("branch", "", "skills: with -import or -catalog of a repository URL, the branch or tag (default: its default branch)")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -244,22 +246,59 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 
 	case "skills":
+		if *catalog != "" {
+			src, err := sourceFor(*catalog, "", *branch)
+			if err != nil {
+				return err
+			}
+			entries, err := treadle.Catalog(ctx, src.Repo, src.Ref)
+			if err != nil {
+				return err
+			}
+			for _, e := range entries {
+				if e.Problem != "" {
+					fmt.Fprintf(out, "%-28s can't be imported: %s\n", e.Source.Path, e.Problem)
+					continue
+				}
+				fmt.Fprintf(out, "%-28s %s: %s\n", e.Source.Path, e.Name, e.Description)
+			}
+			return nil
+		}
 		if *store == "" || fs.NArg() != 0 {
-			return errors.New("skills needs -store DIR, and optionally -add FOLDER\n" + usage)
+			return errors.New("skills needs -store DIR\n" + usage)
 		}
 		s, err := warp.Init(ctx, *store)
 		if err != nil {
 			return err
 		}
 		lib := &treadle.Library{Store: s}
-		if *add != "" {
-			files, err := readFolder(*add)
-			if err != nil {
-				return err
-			}
-			sk, err := lib.Add(ctx, files, time.Now())
-			if err != nil {
-				return err
+		if *add != "" || *importSkill != "" {
+			var sk treadle.Skill
+			switch {
+			case *importSkill != "":
+				src, err := sourceFor(*importSkill, *skillPath, *branch)
+				if err != nil {
+					return err
+				}
+				if sk, err = lib.Import(ctx, src, time.Now()); err != nil {
+					return err
+				}
+			case *add == "-":
+				md, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+				if err != nil {
+					return err
+				}
+				if sk, err = lib.Add(ctx, map[string][]byte{treadle.SkillFile: md}, time.Now()); err != nil {
+					return err
+				}
+			default:
+				files, err := treadle.ReadFolder(*add)
+				if err != nil {
+					return err
+				}
+				if sk, err = lib.Add(ctx, files, time.Now()); err != nil {
+					return err
+				}
 			}
 			fmt.Fprintf(out, "added %s at %s\n", sk.Name, sk.Version)
 			return nil
@@ -382,35 +421,15 @@ func warnSkipped(skipped []error) {
 	}
 }
 
-// readFolder reads every regular file under dir, by "/"-separated path.
-// Hidden files and folders (.git, .DS_Store) aren't part of a skill and
-// are left out; symbolic links and other special files are refused: a
-// skill is its files' bytes.
-func readFolder(dir string) (map[string][]byte, error) {
-	files := map[string][]byte{}
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path != dir && strings.HasPrefix(d.Name(), ".") {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("%s isn't a regular file", path)
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		b, err := os.ReadFile(path)
-		files[filepath.ToSlash(rel)] = b
-		return err
-	})
-	return files, err
+// stdin is where -add - reads a SKILL.md; tests replace it.
+var stdin io.Reader = os.Stdin
+
+// sourceFor reads a skill source from the command line: a GitHub link,
+// which carries its own branch and folder, or a repository URL with
+// -path and -branch.
+func sourceFor(link, path, branch string) (treadle.Source, error) {
+	if strings.HasPrefix(link, "https://github.com/") && path == "" && branch == "" {
+		return treadle.ParseGitHub(link)
+	}
+	return treadle.Source{Repo: link, Ref: branch, Path: path}, nil
 }

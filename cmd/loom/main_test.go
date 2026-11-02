@@ -5,6 +5,7 @@ import (
 	"context"
 	"go.temporal.io/sdk/testsuite"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -171,5 +172,38 @@ func TestWorkerCommandsAreTheRegistry(t *testing.T) {
 	}
 	if got, want := strings.Join(reg.Names(), " "), strings.Join(registry().Names(), " "); got != want {
 		t.Errorf("worker commands %s, registry() %s", got, want)
+	}
+}
+
+// TestImportCommands: loom skills -catalog lists a repository's skills,
+// -import keeps one with its source, and -add - keeps a pasted SKILL.md.
+func TestImportCommands(t *testing.T) {
+	dir := t.TempDir()
+	repo := dir + "/repo"
+	os.MkdirAll(repo+"/skills/pdf", 0o755)
+	os.WriteFile(repo+"/skills/pdf/SKILL.md", []byte("---\nname: pdf\ndescription: Reads PDFs.\n---\nx\n"), 0o644)
+	for _, a := range [][]string{{"init", "-q", "-b", "main"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "x"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, a...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"skills", "-catalog", "file://" + repo}, &out); err != nil || !strings.Contains(out.String(), "skills/pdf") || !strings.Contains(out.String(), "pdf: Reads PDFs.") {
+		t.Errorf("catalog: %v %s", err, out.String())
+	}
+	store := dir + "/store.git"
+	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store, "-import", "file://" + repo, "-path", "skills/pdf"}, &out); err != nil || !strings.HasPrefix(out.String(), "added pdf at ") {
+		t.Errorf("import: %v %s", err, out.String())
+	}
+	stdin = strings.NewReader("---\nname: brief\ndescription: Writes a brief.\n---\nBe short.\n")
+	defer func() { stdin = os.Stdin }()
+	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", "-"}, &out); err != nil || !strings.HasPrefix(out.String(), "added brief at ") {
+		t.Errorf("paste: %v %s", err, out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store}, &out); err != nil || !strings.Contains(out.String(), "brief") || !strings.Contains(out.String(), "pdf") {
+		t.Errorf("list: %v %s", err, out.String())
 	}
 }
