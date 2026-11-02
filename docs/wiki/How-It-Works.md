@@ -35,13 +35,20 @@ git --git-dir $S log --format='%h %s' refs/loom/runs -- files/n0/report.txt
 git --git-dir $S diff refs/loom/runs~1 refs/loom/runs -- files/
 ```
 
-Any output that is a JSON object whose key `files` (exactly) is an array of `{"path", "text" or "base64"}` objects is read the same way (`loom.StepFiles`); an entry with neither is an empty file. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored.
+Any output that is a JSON object whose key `files` (exactly) is an array of `{"path", "text" or "base64"}` objects is read the same way (`loom.StepFiles`); an entry with neither is an empty file. An entry with `oci`, `sha256` and `size` instead is a file the agent kept in an OCI registry because it was too big for the record ([pirn → Large files](https://github.com/heedle-ai/pirn/wiki/How-It-Works#large-files)): its path holds a small pointer, never an empty file:
+
+```text
+oci ghcr.io/acme/heedle-files@sha256:<64 hex digits>
+size 5662310
+```
+
+`oras blob fetch --output FILE <that reference>` gets the file back. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored.
 
 Each entry is checked on its own; one that fails stays in the output but not in `files/`, and the step's other files are still recorded:
 
 | Left out | Why |
 |---|---|
-| Not an object with a string `path`, and a string `text` or `base64`; both of them; bad base64 | Malformed |
+| Not an object with a string `path`, and a string `text` or `base64`; both of them; bad base64; `oci` with `text` or `base64`, a repository that isn't `host/path` in lower case, a `sha256` that isn't 64 lower-case hex digits, or no whole non-negative `size` | Malformed |
 | A path segment that is empty, `.` or `..`; starts with `.git` or `git~` in any case; has `~` and a digit; ends in `.` or a space; or holds a character macOS ignores in names | Git refuses these, or treats them as `.git` or `.gitmodules` on some systems, and a store holding one fails `git fsck --strict` and can't be pushed |
 | A path listed more than once | Ambiguous: all of them are left out |
 | A path that, ignoring case, matches or runs through an earlier file, or matches an earlier directory (in sorted order) | It couldn't be checked out on macOS's case-insensitive disks |
