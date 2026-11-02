@@ -37,7 +37,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
   loom compile (PROGRAM | -f FILE)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
@@ -70,6 +70,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
+	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -92,6 +93,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
 		reg := draft.DefaultRegistry()
 		if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
+			return err
+		}
+		if err := bobbin.RegisterImage(reg, w, bobbin.Runner{}, imageRegistryFor(*imageRegistry)); err != nil {
 			return err
 		}
 		if err := reed.Register(reg, w, reed.Browser{Image: *browserImage, Network: *browserNetwork}); err != nil {
@@ -238,6 +242,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 func registry() *draftregistry.Registry {
 	reg := draft.DefaultRegistry()
 	reg.MustRegister(bobbin.BuiltinSpec())
+	reg.MustRegister(bobbin.ImageBuiltinSpec())
 	reg.MustRegister(reed.BuiltinSpec())
 	reg.MustRegister(pirn.BuiltinSpec())
 	reg.MustRegister(pirn.AgentBuiltinSpec())
@@ -273,4 +278,13 @@ func registryFor(repo string) *pirn.Registry {
 		return nil
 	}
 	return &pirn.Registry{Repo: repo}
+}
+
+// imageRegistryFor is where (image … "push") pushes, or nil: then such
+// steps fail with ImageSetup.
+func imageRegistryFor(repo string) *bobbin.ImageRegistry {
+	if repo == "" {
+		return nil
+	}
+	return &bobbin.ImageRegistry{Repo: repo}
 }
