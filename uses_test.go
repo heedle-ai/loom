@@ -3,6 +3,7 @@ package loom_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -54,10 +55,18 @@ func TestLaw_PinnedRunsCheckAgainstTheirPins(t *testing.T) {
 		t.Errorf("a plan the program doesn't compile to passed: %v", err)
 	}
 	refuse := func(context.Context, plan.Plan) (*registry.Registry, error) {
-		return nil, errors.New("no such version")
+		return nil, fmt.Errorf("%w: no such version", warp.ErrInvalid)
 	}
 	if err := (&loom.Checker{Registry: pinned("v2"), RegistryFor: refuse}).Check(ctx, in); !mismatch(err) {
 		t.Errorf("an unknown pin passed: %v", err)
+	}
+	// Review 13: a store that failed to answer failed the run for good.
+	flaky := func(context.Context, plan.Plan) (*registry.Registry, error) {
+		return nil, errors.New("git: resource busy")
+	}
+	var app *temporal.ApplicationError
+	if err := (&loom.Checker{Registry: pinned("v2"), RegistryFor: flaky}).Check(ctx, in); err == nil || errors.As(err, &app) {
+		t.Errorf("a transient failure wasn't retryable: %v", err)
 	}
 }
 
