@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -95,5 +96,37 @@ func TestBeliefsCommand(t *testing.T) {
 		if err := run(ctx, bad, &out); err == nil {
 			t.Errorf("run(%v) succeeded, want an error", bad)
 		}
+	}
+}
+
+// TestSkillsCommand: loom skills adds a skill's folder to a store and
+// lists it; loom compile with that store turns the skill into a command
+// pinned to its version.
+func TestSkillsCommand(t *testing.T) {
+	dir := t.TempDir()
+	store, folder := dir+"/store.git", dir+"/weather"
+	os.MkdirAll(folder+"/scripts", 0o755)
+	os.WriteFile(folder+"/SKILL.md", []byte("---\nname: weather\ndescription: Says the weather for a city.\n---\nRun scripts/get.sh.\n"), 0o644)
+	os.WriteFile(folder+"/scripts/get.sh", []byte("echo sunny\n"), 0o644)
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", folder}, &out); err != nil || !strings.HasPrefix(out.String(), "added weather at ") {
+		t.Fatalf("add: %v %s", err, out.String())
+	}
+	version := strings.TrimSpace(strings.TrimPrefix(out.String(), "added weather at "))
+	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store}, &out); err != nil || !strings.Contains(out.String(), "weather") || !strings.Contains(out.String(), version[:12]) {
+		t.Errorf("list: %v %s", err, out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"compile", "-store", store, `(weather "Boston")`}, &out); err != nil ||
+		!strings.Contains(out.String(), `"activity": "Skill"`) || !strings.Contains(out.String(), version) {
+		t.Errorf("compile: %v %s", err, out.String())
+	}
+	if err := run(context.Background(), []string{"compile", `(weather "Boston")`}, &out); err == nil {
+		t.Error("compiled a skill without its store")
+	}
+	os.Symlink("/etc/passwd", folder+"/passwd")
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", folder}, &out); err == nil {
+		t.Error("added a folder with a symbolic link")
 	}
 }

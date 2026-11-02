@@ -20,9 +20,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -33,13 +36,16 @@ import (
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/pirn"
 	"github.com/heedle-ai/reed"
+	"github.com/heedle-ai/shuttle/plan"
+	"github.com/heedle-ai/treadle"
 	"github.com/heedle-ai/warp"
 )
 
 const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
-  loom compile (PROGRAM | -f FILE)
+  loom compile [-store DIR] (PROGRAM | -f FILE)
+  loom skills  -store DIR [-add FOLDER]
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
   loom beliefs -store DIR [-ref REF]
@@ -71,6 +77,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
+	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -105,10 +112,19 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err := pirn.Register(reg, w, claude); err != nil {
 			return err
 		}
-		if err := pirn.RegisterAgent(reg, w, pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry)}); err != nil {
+		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry)}
+		if err := pirn.RegisterAgent(reg, w, agent); err != nil {
 			return err
 		}
-		loom.Register(w, s, reg)
+		// Skills are the store's, at their newest when the worker starts;
+		// each run is checked against, and records, the versions it pins.
+		lib := &treadle.Library{Store: s}
+		if err := treadle.Register(ctx, reg, w, agent, lib); err != nil {
+			return err
+		}
+		loom.RegisterWith(w, &loom.Checker{Registry: reg, RegistryFor: func(ctx context.Context, p plan.Plan) (*draftregistry.Registry, error) {
+			return lib.Pinned(ctx, registry(), p)
+		}}, &loom.Recorder{Store: s, Uses: lib.Uses})
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 
@@ -117,7 +133,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		p, err := loom.Compile(ctx, registry(), src)
+		reg := registry()
+		if *store != "" {
+			s, err := warp.Open(ctx, *store)
+			if err != nil {
+				return err
+			}
+			if err := (&treadle.Library{Store: s}).AddTo(ctx, reg); err != nil {
+				return err
+			}
+		}
+		p, err := loom.Compile(ctx, reg, src)
 		if err != nil {
 			return err
 		}
@@ -229,6 +255,36 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 
+	case "skills":
+		if *store == "" || fs.NArg() != 0 {
+			return errors.New("skills needs -store DIR, and optionally -add FOLDER\n" + usage)
+		}
+		s, err := warp.Init(ctx, *store)
+		if err != nil {
+			return err
+		}
+		lib := &treadle.Library{Store: s}
+		if *add != "" {
+			files, err := readFolder(*add)
+			if err != nil {
+				return err
+			}
+			sk, err := lib.Add(ctx, files, time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "added %s at %s\n", sk.Name, sk.Version)
+			return nil
+		}
+		skills, err := lib.Skills(ctx)
+		if err != nil {
+			return err
+		}
+		for _, sk := range skills {
+			fmt.Fprintf(out, "%-20s %.12s  %s\n", sk.Name, sk.Version, sk.Description)
+		}
+		return nil
+
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
@@ -287,4 +343,30 @@ func imageRegistryFor(repo string) *bobbin.ImageRegistry {
 		return nil
 	}
 	return &bobbin.ImageRegistry{Repo: repo}
+}
+
+// readFolder reads every regular file under dir, by "/"-separated path.
+// Symbolic links and other special files are refused: a skill is its
+// files' bytes.
+func readFolder(dir string) (map[string][]byte, error) {
+	files := map[string][]byte{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("%s isn't a regular file", path)
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		files[filepath.ToSlash(rel)] = b
+		return err
+	})
+	return files, err
 }

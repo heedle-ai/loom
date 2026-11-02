@@ -56,6 +56,13 @@ jobs:
           repository: heedle-ai/pirn
           path: pirn
           ssh-key: ${{ secrets.PIRN_DEPLOY_KEY }}
+      - name: private-treadle
+        # read-only deploy key on heedle-ai/treadle
+        uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/treadle
+          path: treadle
+          ssh-key: ${{ secrets.TREADLE_DEPLOY_KEY }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: loom/go.mod
