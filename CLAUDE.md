@@ -58,5 +58,8 @@ why the existing tool can't do it.
 - **Workflow code is deterministic.** Workflows use only workflow APIs;
   all warp I/O happens in activities (`TestInv_WorkflowsDoNoIO`).
 - **Conflicts are retried by Temporal,** not by loops in loom.
+- **Run every CI step before pushing,** not only the Go tests:
+  `bash .github/invariants.sh` and
+  `go run go.temporal.io/sdk/contrib/tools/workflowcheck@v0.6.0 ./...`.
 - `go.mod` replaces the heedle-ai modules with `../` checkouts until they are
   published; clone all repos as siblings.

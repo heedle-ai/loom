@@ -118,7 +118,12 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 
 	// Each queued write runs once (or never, if it isn't approved), before
 	// the record, which keeps what came of it.
-	writes = QueuedWrites(in.Plan, res)
+	// Reading the steps' outputs (JSON) is a local activity: workflow code
+	// decodes nothing itself.
+	queued := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{StartToCloseTimeout: 10 * time.Second})
+	if err := workflow.ExecuteLocalActivity(queued, queuedWrites, in.Plan, res).Get(ctx, &writes); err != nil {
+		return RunResult{}, err
+	}
 	if len(writes) > 0 {
 		writes = runWrites(ctx, writes)
 	}
