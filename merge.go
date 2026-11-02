@@ -853,6 +853,12 @@ func SubmitMerge(ctx context.Context, c client.Client, taskQueue string, in Merg
 }
 
 func submitJSON(ctx context.Context, c client.Client, taskQueue, prefix, name string, in any) (client.WorkflowRun, error) {
+	return submitJSONWithin(ctx, c, taskQueue, prefix, name, in, 0)
+}
+
+// submitJSONWithin is submitJSON with a timeout for the whole workflow (0:
+// none).
+func submitJSONWithin(ctx context.Context, c client.Client, taskQueue, prefix, name string, in any, timeout time.Duration) (client.WorkflowRun, error) {
 	b, err := json.MarshalIndent(in, "", "  ")
 	if err != nil {
 		return nil, err
@@ -865,5 +871,6 @@ func submitJSON(ctx context.Context, c client.Client, taskQueue, prefix, name st
 		ID:                       prefix + string(id),
 		TaskQueue:                taskQueue,
 		WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		WorkflowExecutionTimeout: timeout,
 	}, name, in)
 }
