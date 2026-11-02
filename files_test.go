@@ -3,6 +3,8 @@ package loom_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -110,36 +112,84 @@ func TestInv_StepFilesDiffAcrossRuns(t *testing.T) {
 	}
 }
 
-// TestInv_StepFilesNeverFailARecord: a file whose path Git can't hold, or
-// that is malformed, is left out of files/ (it stays in the output), in
-// the same way whatever order the output lists files in; the record
-// always succeeds. (A record that fails non-retryably loses the run.)
+// TestInv_StepFilesNeverFailARecord: a file whose path Git refuses or
+// treats specially, a repeated path, a path that clashes with another
+// ignoring case, or a malformed entry, is left out of files/ (it stays in
+// the output) without dropping the step's other files, in the same way
+// whatever order the output lists them in; the record always succeeds and
+// the store passes git fsck --strict, so it can still be pushed. (Review
+// 8: such paths made fsck fail, and one mistyped entry dropped every
+// file.)
 func TestInv_StepFilesNeverFailARecord(t *testing.T) {
 	text := func(p string) map[string]any { return map[string]any{"path": p, "text": "x"} }
-	list := []map[string]any{
+	evil := "[submodule \"../../evil\"]\n\tpath = x\n\turl = --upload-pack=touch /tmp/pwned\n"
+	list := []any{
 		text("ok.txt"), text("../escape"), text("/abs"), text("a//b"), text(""), text("."), text(".git/config"), text("d/.GIT"),
-		text("f"), text("f/under-a-file"), text("g/h"), text("g"), text("ok.txt"),
-		{"path": "both", "text": "x", "base64": "eA=="}, {"path": "bad64", "base64": "!!"}, text("nul\x00name"),
+		text("f"), text("f/under-a-file"), text("g/h"), text("g"), text("twice"), text("twice"),
+		map[string]any{"path": "both", "text": "x", "base64": "eA=="}, map[string]any{"path": "bad64", "base64": "!!"}, text("nul\x00name"),
+		text(".g\u200cit/config"), text(".git /config"), text(".git./config"), text("git~1/config"), text(".gitmodules/x"),
+		map[string]any{"path": ".gitmodules", "text": evil}, map[string]any{"path": ".gitm\u200codules", "text": evil},
+		map[string]any{"path": "gi7eba~1", "text": evil}, text(".gitattributes"), text("dot."), text("space "),
+		text("README"), text("readme"), text("Dir/a"), text("dir/b"), text("F/x"),
+		map[string]any{"path": "typed", "text": 5}, map[string]any{"path": 7, "text": "x"}, "not an object",
+		map[string]any{"PATH": "loud", "TEXT": "x"}, map[string]any{"path": "sub/ok", "text": "y"},
 	}
-	// In sorted order "g" comes before "g/h", so the file g wins.
-	want := map[string][]byte{"ok.txt": []byte("x"), "f": []byte("x"), "g": []byte("x")}
+	// In sorted order "F/x" comes before "f", so the directory wins and the
+	// file f is left out (ignoring case); "g" comes before "g/h", so the
+	// file wins. "Dir/a" and "dir/b" can share one directory on macOS.
+	x := []byte("x")
+	want := map[string][]byte{"ok.txt": x, "F/x": x, "f/under-a-file": x, "g": x, "README": x, "Dir/a": x, "dir/b": x, "sub/ok": []byte("y")}
 	for i := 0; i < 2; i++ {
-		b, _ := json.Marshal(map[string]any{"files": list})
+		b, _ := json.Marshal(map[string]any{"files": list, "FILES": []any{text("shadow")}})
 		got, skipped := loom.StepFiles(string(b))
 		if !reflect.DeepEqual(got, want) || len(skipped) != len(list)-len(want) {
 			t.Errorf("order %d: files %q, skipped %q", i, got, skipped)
 		}
 		s := newStore(t)
 		recordOutputs(t, s, "run-1", map[string]string{"n0": string(b)})
+		if out, err := exec.Command("git", "--git-dir", s.Dir(), "fsck", "--strict").CombinedOutput(); err != nil {
+			t.Errorf("git fsck --strict: %v\n%s", err, out)
+		}
 		for l, r := 0, len(list)-1; l < r; l, r = l+1, r-1 {
 			list[l], list[r] = list[r], list[l]
 		}
 	}
-	for _, out := range []string{"", "null", "[]", `{"files":"x"}`, `{"files":[1]}`, `{"files":[{"path":1}]}`, "{", "  {\"files\":null}"} {
+	for _, out := range []string{"", "null", "[]", `{"files":"x"}`, `{"files":[1]}`, `{"files":[{"path":1}]}`, "{", "  {\"files\":null}", `{"Files":[{"path":"a"}]}`} {
 		if got, _ := loom.StepFiles(out); len(got) != 0 {
 			t.Errorf("StepFiles(%q) = %q", out, got)
 		}
 	}
+}
+
+// TestInv_StepFilesAreBounded: a record holds at most MaxRecordedFiles
+// step files in all (the first in node, then path, order), so it finishes
+// well inside Record's timeout. (Review 8: 20,000 files took 56 s, and
+// past the timeout every attempt failed and the run was lost.)
+func TestInv_StepFilesAreBounded(t *testing.T) {
+	var fs []map[string]string
+	for i := 0; i < 3000; i++ {
+		fs = append(fs, map[string]string{"path": fmt.Sprintf("f%05d", i)})
+	}
+	b, _ := json.Marshal(map[string]any{"files": fs})
+	s := newStore(t)
+	start := time.Now()
+	c := recordOutputs(t, s, "run-1", map[string]string{"n0": string(b), "n1": filesOutput1("late.txt")})
+	took := time.Since(start)
+	tree, _ := must2(s.Parents(ctx, c))
+	files := entry(t, s, tree, loom.FilesDir).ID
+	n0 := must(s.Tree(ctx, entry(t, s, files, "n0").ID))
+	if len(n0) != loom.MaxRecordedFiles || n0[0].Name != "f00000" || n0[len(n0)-1].Name != fmt.Sprintf("f%05d", loom.MaxRecordedFiles-1) {
+		t.Errorf("%d files recorded, first %s", len(n0), n0[0].Name)
+	}
+	if _, ok := file(t, s, files, "n1/late.txt"); ok {
+		t.Error("a later node's files were recorded past the limit")
+	}
+	t.Logf("recorded %d files in %v", loom.MaxRecordedFiles, took)
+}
+
+func filesOutput1(path string) string {
+	b, _ := json.Marshal(map[string]any{"files": []map[string]string{{"path": path, "text": "x"}}})
+	return string(b)
 }
 
 // FuzzStepFiles: whatever a step outputs, the files it keeps are ones a
