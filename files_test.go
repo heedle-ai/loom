@@ -244,6 +244,10 @@ func TestInv_RegistryFilesArePointers(t *testing.T) {
 		{"path": "a", "oci": "ghcr.io/acme/files:v1", "sha256": sum, "size": 1},
 		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum, "size": 1, "text": "x"},
 		{"path": "a", "oci": 5, "sha256": sum, "size": 1},
+		// Review 10: a null size was recorded as 0, and a null oci as an empty file.
+		{"path": "a", "oci": "ghcr.io/acme/files", "sha256": sum, "size": nil},
+		{"path": "a", "oci": nil, "sha256": sum, "size": 1},
+		{"path": "a", "text": nil},
 	} {
 		b, _ := json.Marshal(map[string]any{"files": []any{bad}})
 		if got, _ := loom.StepFiles(string(b)); len(got) != 0 {

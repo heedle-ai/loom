@@ -42,13 +42,13 @@ oci ghcr.io/acme/heedle-files@sha256:<64 hex digits>
 size 5662310
 ```
 
-`oras blob fetch --output FILE <that reference>` gets the file back. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored.
+`oras blob fetch --output FILE <that reference>` gets the file back. A pointer is an ordinary small text file in Git: what tells it from a step's own text file is the step's output, which marks it with `oci`. The rest of what changed in the container, the scratch, is only listed in the output (`changes`), never stored.
 
 Each entry is checked on its own; one that fails stays in the output but not in `files/`, and the step's other files are still recorded:
 
 | Left out | Why |
 |---|---|
-| Not an object with a string `path`, and a string `text` or `base64`; both of them; bad base64; `oci` with `text` or `base64`, a repository that isn't `host/path` in lower case, a `sha256` that isn't 64 lower-case hex digits, or no whole non-negative `size` | Malformed |
+| Not an object with a string `path`, and a string `text` or `base64`; both of them; bad base64; `oci` with `text` or `base64`, a repository that isn't `host/path` in lower case, a `sha256` that isn't 64 lower-case hex digits, or no whole non-negative `size`; any of these fields present but `null` | Malformed |
 | A path segment that is empty, `.` or `..`; starts with `.git` or `git~` in any case; has `~` and a digit; ends in `.` or a space; or holds a character macOS ignores in names | Git refuses these, or treats them as `.git` or `.gitmodules` on some systems, and a store holding one fails `git fsck --strict` and can't be pushed |
 | A path listed more than once | Ambiguous: all of them are left out |
 | A path that, ignoring case, matches or runs through an earlier file, or matches an earlier directory (in sorted order) | It couldn't be checked out on macOS's case-insensitive disks |

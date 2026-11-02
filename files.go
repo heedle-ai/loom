@@ -103,6 +103,11 @@ func readEntry(r json.RawMessage) (path string, data []byte, ok bool) {
 	if json.Unmarshal(r, &m) != nil || json.Unmarshal(m["path"], &path) != nil {
 		return "", nil, false
 	}
+	for _, k := range []string{"text", "base64", "oci", "sha256", "size"} {
+		if v, ok := m[k]; ok && string(v) == "null" {
+			return path, nil, false // present but null: malformed, not absent
+		}
+	}
 	var text, b64, oci *string
 	if m["text"] != nil && json.Unmarshal(m["text"], &text) != nil || m["base64"] != nil && json.Unmarshal(m["base64"], &b64) != nil ||
 		m["oci"] != nil && json.Unmarshal(m["oci"], &oci) != nil {
@@ -114,12 +119,12 @@ func readEntry(r json.RawMessage) (path string, data []byte, ok bool) {
 	if oci != nil {
 		// Kept in a registry: record a pointer, never an empty file.
 		var sum string
-		var size int64
+		var size *int64
 		if text != nil || b64 != nil || !ociRepo.MatchString(*oci) || json.Unmarshal(m["sha256"], &sum) != nil || !sha256Hex.MatchString(sum) ||
-			json.Unmarshal(m["size"], &size) != nil || size < 0 {
+			json.Unmarshal(m["size"], &size) != nil || size == nil || *size < 0 {
 			return path, nil, false
 		}
-		return path, Pointer(*oci, sum, size), true
+		return path, Pointer(*oci, sum, *size), true
 	}
 	switch {
 	case b64 != nil:
