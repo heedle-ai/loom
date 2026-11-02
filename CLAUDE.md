@@ -3,7 +3,7 @@
 Runs draft programs on shuttle and records every run in warp. Part of heedle-ai:
 weft (algebra) → draft (language) → shuttle (execution) → bobbin (runtime) →
 warp (object store) → drawdown (UI); reed gives browsing
-agents a browser; loom runs them together.
+agents a browser; pirn gives them Claude; loom runs them together.
 
 ## The first rule: reuse, never rewrite
 

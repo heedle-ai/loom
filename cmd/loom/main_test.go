@@ -36,6 +36,12 @@ func TestCompileCommand(t *testing.T) {
 		!strings.Contains(out.String(), `"activity": "Browse"`) || !strings.Contains(out.String(), `"cdn.example"`) {
 		t.Errorf("browse program: %v\n%s", err, out.String())
 	}
+	// pirn's ask command is available too, after browse in a pipeline.
+	out.Reset()
+	if err := run(context.Background(), []string{"compile", `(pipe (browse "https://a.example/") (ask "Summarize."))`}, &out); err != nil ||
+		!strings.Contains(out.String(), `"activity": "Ask"`) || !strings.Contains(out.String(), `"Summarize."`) {
+		t.Errorf("ask program: %v\n%s", err, out.String())
+	}
 	for _, bad := range [][]string{nil, {"bogus"}, {"compile"}, {"worker"}} {
 		if err := run(context.Background(), bad, &out); err == nil {
 			t.Errorf("run(%v) succeeded, want usage error", bad)
