@@ -1,6 +1,6 @@
 This page states what heedle-ai guarantees, in categorical terms, and names the test behind each claim. [Invariants](Invariants) lists every guard, and CI checks it against the code.
 
-[[/images/run.svg|alt=String diagram of a run: run = Δ ; (id ⊗ (compile ; Δ ; (id ⊗ ⟦–⟧))) ; record]]
+[[/images/run.svg|alt=String diagram of a run: run = Δ ; (id ⊗ (compile ; Δ ; (id ⊗ (⟦–⟧ ; writes)))) ; record]]
 
 [[/images/shipment.svg|alt=String diagram of the shipment program: Δ₃ ; (weather ⊗ carrier ⊗ factory) ; assess]]
 
@@ -26,7 +26,7 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | 1 | **Category laws** for arrows: left and right identity, associativity, the `Map` functor laws, `Pipe` = nested `Compose`, and the product and coproduct laws (`Par(f, g) ; Fst = f`, `Left ; Sum(f, g) = f`) | weft `laws_test.go` (property-based, 200 random inputs each) |
 | 2 | **`pipe` is sequential composition, `par` is a labelled product:** nested programs compile to exactly the expected dependency graph, including fan-out, fan-in and nesting. A joining node receives each branch's output under that branch's node ID | draft `TestPar_*` in `run_test.go` |
 | 3 | **Compiling is a function:** the same source always gives byte-identical plans | loom `TestLaw_CompileIsAFunction` |
-| 4 | **loom adds nothing to execution:** `RunWorkflow = Check ; PlanWorkflow ; Record`, where `Check` only refuses input and never changes it, and its outputs equal running the plan with shuttle alone, for every program shape tested | loom `TestLaw_LoomAgreesWithShuttle` |
+| 4 | **loom adds nothing to execution:** `RunWorkflow = Check ; PlanWorkflow ; Writes ; Record`, where `Check` only refuses input and never changes it, `Writes` runs only the writes agent steps queued (none, for a program with no granted writes) and changes no output, and its outputs equal running the plan with shuttle alone, for every program shape tested | loom `TestLaw_LoomAgreesWithShuttle` |
 | 5 | **Records are self-verifying:** recompiling a commit's `program.draft`, with the command versions its `plan.json` pins (such as skills, whose trees the record keeps under `uses/`), reproduces that plan byte for byte, and re-running that plan reproduces its outputs. A run is checked against its own pins, never against what is newest when it runs | loom `TestLaw_RecordsAreReproducible`, `TestLaw_PinnedRunsCheckAgainstTheirPins` |
 | 6 | **History only grows:** each run's commit has the previous head as its parent, so the ref moves only forward | loom `TestLaw_RefOnlyMovesForward`, `TestRecord_ConcurrentRunsFormOneLinearHistory` |
 | 7 | **Identity is content:** equal content has equal IDs; a workflow's ID is the Git ID of its input (program, plan, ref), so any difference in the request is a different workflow | warp `TestBlob_ContentAddressed`, loom `TestWorkflowID_IsGitIDOfTheRunInput` |
@@ -37,11 +37,12 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | 12 | **Merge is the union of histories:** every run of both sides stays in the history, and the merged beliefs are exactly both sides' questions, each answered by the three-way rule (one side changed: that side; both changed differently: the chosen resolution) | loom `TestLaw_MergeIsUnionOfHistories`, warp `TestLaw_MergeTreesIsThreeWayMerge` |
 | 13 | **Merge is commutative, associative and idempotent** on beliefs: A + B = B + A (ours on one side is theirs on the other), (A + B) + C = A + (B + C) without conflicts, and merging what's already merged changes nothing | loom `TestLaw_MergeIsCommutative`, `TestLaw_MergeIsAssociative`, `TestLaw_MergeIsIdempotent` |
 | 14 | **Every commit's files are a real run,** merges included: a merge commit's `program.draft`, `plan.json` and `outputs/` are its first parent's run | loom `TestLaw_MergeRecordsStaySelfVerifying` |
+| 15 | **Writes run at most once per run:** a write an agent step queued, and was granted, runs once after the run's steps (once approved, if it must be), with one attempt, never retried, however often its step was retried; a write it wasn't granted, or one in an output that isn't an agent step's, never runs; the record keeps every write and what came of it | loom `TestLaw_WritesRunAtMostOnce`, `TestInv_WritesWaitForApproval`; pirn `TestLaw_GrantsOnlyNarrow` (a step gets only what both it and the worker grant) |
 
 ## Where the guarantees stop
 
 - **Law 5 is about determinism, not truth.** `echo` is deterministic, so re-running reproduces outputs. A command that calls the outside world (weather, prices) won't reproduce, and the record is then the only evidence of what it returned. That's the record's purpose.
-- **Effects are outside the category.** Retries can repeat a side effect. Commands with effects must be idempotent.
+- **Effects are outside the category.** Retries can repeat a side effect of a command, so commands with effects must be idempotent. A connector's declared writes are the exception: a step only queues them, and loom runs each at most once (law 15). A write whose single attempt fails without saying whether it happened is recorded as failed, never tried again: at most once, not exactly once. And it is at most once per run: a new run (resubmitting the program, or a merge's `rerun`) queues its writes again.
 - **`par`'s product is labelled by node ID.** Branches are told apart by the IDs draft assigns (`n0`, `n1`, …), not by position. Join order is whatever the joining command chooses; `echo` uses node-ID string order.
 - **`par` is a product of plans, not of arrows in one process.** Each branch is a separate Temporal activity; the laws above are checked for the shapes in the tests, not proved for every program.
 - **Merges are of whole runs.** A merge never combines two runs into one; a question both sides answered differently is a conflict you resolve. After a criss-cross merge, questions the common ancestors disagree on conflict unless both sides agree. See [Branching and Merging](Branching-and-Merging).

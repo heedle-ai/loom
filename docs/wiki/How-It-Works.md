@@ -69,6 +69,22 @@ Shuttle-Run: <Temporal run ID>
 
 The commit time is the workflow's clock at the moment of recording, never the wall clock, so recording the same run twice produces the same commit.
 
+## Writes
+
+An agent step granted a connector's write tool (such as sending an email) never runs it: it queues it ([pirn → Connectors](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors)). After the plan's steps, `RunWorkflow` takes the queued writes from the agent steps' outputs, in plan order (`QueuedWrites`): only from steps whose activity is pirn's `Agent`, and only writes the step's own arguments granted; any other is `refused`, never run.
+
+| Status | Meaning |
+|---|---|
+| `waiting` | Its connector says `approve`: it waits for a person, up to 7 days (`WriteApprovalTimeout`) |
+| `approved` | Approved, or needing no approval: it runs next |
+| `declined` | A person said no: never run |
+| `expired` | Nobody decided in time: never run |
+| `done` | Ran once; `output` is what the tool said |
+| `failed` | Its one attempt failed (or its outcome is unknown): never tried again |
+| `refused` | Its step wasn't granted it: never run |
+
+A decision is a signal to the run (`WriteSignal`, a `WriteDecision`); `loom writes -workflow ID -approve n0/w1` (or `-decline`) sends one, as drawdown's Approve and Decline buttons do, and `loom writes -workflow ID` lists a run's writes so far (`WritesQuery`). Each approved write runs as pirn's `PirnWrite` activity with one attempt: Temporal never retries it, and a worker that dies mid-write leaves it `failed`, so a write runs at most once (Soundness law 15). Then the record keeps every write and what came of it in `writes.json`; a run with no writes has none. `loom run` prints them after the outputs. A later step in the same run never sees a write's result: writes come after all the steps. A decision is final: the first one for a write stands. A decision sent before the run's writes were known is dropped, so a person decides only a write they could see, and a signal that isn't a decision is ignored. A write runs at most once **per run**: a new run of the same program, or a merge that re-runs a question (`-resolve rerun`), runs its agent steps again and queues their writes again, each waiting for its own approval if its connector says so.
+
 ## Changing skills
 
 A worker's skills ([treadle](https://github.com/heedle-ai/treadle/wiki)) change in two ways: `loom skills` on the worker's store, or `SkillsWorkflow` (`loom.ChangeSkills`), which runs one `LoomSkillsChange` activity on a worker. drawdown uses the workflow, since it never writes to the store itself. A change is one of:
