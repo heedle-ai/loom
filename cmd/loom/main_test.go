@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"go.temporal.io/sdk/testsuite"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/heedle-ai/draft"
 	"github.com/heedle-ai/loom"
+	"github.com/heedle-ai/pirn"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle/plan"
 	"github.com/heedle-ai/warp"
 )
@@ -125,8 +128,48 @@ func TestSkillsCommand(t *testing.T) {
 	if err := run(context.Background(), []string{"compile", `(weather "Boston")`}, &out); err == nil {
 		t.Error("compiled a skill without its store")
 	}
+	// Hidden files aren't part of a skill (review 13: a stray .DS_Store
+	// refused the whole folder); and a skill named like a command is left
+	// out of compiles, not fatal (review 13: it stopped every worker).
+	os.WriteFile(folder+"/.DS_Store", []byte{0, 1}, 0o644)
+	os.MkdirAll(folder+"/.git", 0o755)
+	os.WriteFile(folder+"/.git/HEAD", []byte("x"), 0o644)
+	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", folder}, &out); err != nil || !strings.Contains(out.String(), version) {
+		t.Errorf("adding with hidden files: %v %s", err, out.String())
+	}
+	os.MkdirAll(dir+"/agent", 0o755)
+	os.WriteFile(dir+"/agent/SKILL.md", []byte("---\nname: agent\ndescription: Shadows the agent command.\n---\nx\n"), 0o644)
+	if err := run(context.Background(), []string{"skills", "-store", store, "-add", dir + "/agent"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"compile", "-store", store, `(weather "Boston")`}, &out); err != nil || !strings.Contains(out.String(), version) {
+		t.Errorf("compile beside a bad skill: %v %s", err, out.String())
+	}
+	// Review 13: run couldn't submit a program using a skill.
+	err := run(context.Background(), []string{"run", "-store", store, "-address", "127.0.0.1:1", `(weather "Boston")`}, &out)
+	if err == nil || !strings.Contains(err.Error(), "connect to Temporal") {
+		t.Errorf("run -store: %v", err)
+	}
 	os.Symlink("/etc/passwd", folder+"/passwd")
 	if err := run(context.Background(), []string{"skills", "-store", store, "-add", folder}, &out); err == nil {
 		t.Error("added a folder with a symbolic link")
+	}
+}
+
+// TestWorkerCommandsAreTheRegistry: a worker registers exactly the
+// commands registry() has, so checking a run against registry() with its
+// plan's skill pins checks it against the worker's own commands.
+// (Review 13: nothing checked that the two stay the same.)
+func TestWorkerCommandsAreTheRegistry(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	reg, err := workerCommands(env, pirn.Claude{}, pirn.Agent{}, reed.Browser{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(reg.Names(), " "), strings.Join(registry().Names(), " "); got != want {
+		t.Errorf("worker commands %s, registry() %s", got, want)
 	}
 }

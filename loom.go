@@ -132,7 +132,9 @@ type Checker struct {
 	// RegistryFor, if set, is the registry a plan's program compiles with,
 	// used instead of Registry: one with the versions of the commands the
 	// plan pins (such as treadle's skills), so a run is checked against
-	// what it was compiled with, not what is newest when it runs.
+	// what it was compiled with, not what is newest when it runs. Its
+	// errors wrapping warp.ErrInvalid or warp.ErrNotFound (a pin that is
+	// wrong) fail the run; any other is retried.
 	RegistryFor func(context.Context, plan.Plan) (*registry.Registry, error)
 }
 
@@ -148,7 +150,12 @@ func (c *Checker) Check(ctx context.Context, in RunInput) error {
 	if c.RegistryFor != nil {
 		var err error
 		if reg, err = c.RegistryFor(ctx, in.Plan); err != nil {
-			return temporal.NewNonRetryableApplicationError("the plan's pinned commands aren't on this worker: "+err.Error(), "ProgramPlanMismatch", err)
+			// Only a pin that is itself wrong is permanent; a store that
+			// failed to answer, or a cancelled check, is retried.
+			if errors.Is(err, warp.ErrInvalid) || errors.Is(err, warp.ErrNotFound) {
+				return temporal.NewNonRetryableApplicationError("the plan's pinned commands aren't on this worker: "+err.Error(), "ProgramPlanMismatch", err)
+			}
+			return err
 		}
 	}
 	p, err := Compile(ctx, reg, in.Program)

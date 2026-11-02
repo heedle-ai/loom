@@ -43,7 +43,7 @@ import (
 
 const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO]
-  loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] (PROGRAM | -f FILE)
+  loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER]
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
@@ -98,30 +98,20 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
-		reg := draft.DefaultRegistry()
-		if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
-			return err
-		}
-		if err := bobbin.RegisterImage(reg, w, bobbin.Runner{}, imageRegistryFor(*imageRegistry)); err != nil {
-			return err
-		}
-		if err := reed.Register(reg, w, reed.Browser{Image: *browserImage, Network: *browserNetwork}); err != nil {
-			return err
-		}
 		claude := pirn.Claude{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: *askModel}
-		if err := pirn.Register(reg, w, claude); err != nil {
-			return err
-		}
 		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry)}
-		if err := pirn.RegisterAgent(reg, w, agent); err != nil {
+		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
+		if err != nil {
 			return err
 		}
 		// Skills are the store's, at their newest when the worker starts;
 		// each run is checked against, and records, the versions it pins.
 		lib := &treadle.Library{Store: s}
-		if err := treadle.Register(ctx, reg, w, agent, lib); err != nil {
+		skipped, err := treadle.Register(ctx, reg, w, agent, lib)
+		if err != nil {
 			return err
 		}
+		warnSkipped(skipped)
 		loom.RegisterWith(w, &loom.Checker{Registry: reg, RegistryFor: func(ctx context.Context, p plan.Plan) (*draftregistry.Registry, error) {
 			return lib.Pinned(ctx, registry(), p)
 		}}, &loom.Recorder{Store: s, Uses: lib.Uses})
@@ -133,15 +123,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		reg := registry()
-		if *store != "" {
-			s, err := warp.Open(ctx, *store)
-			if err != nil {
-				return err
-			}
-			if err := (&treadle.Library{Store: s}).AddTo(ctx, reg); err != nil {
-				return err
-			}
+		reg, err := compileRegistry(ctx, *store)
+		if err != nil {
+			return err
 		}
 		p, err := loom.Compile(ctx, reg, src)
 		if err != nil {
@@ -159,7 +143,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		p, err := loom.Compile(ctx, registry(), src)
+		reg, err := compileRegistry(ctx, *store)
+		if err != nil {
+			return err
+		}
+		p, err := loom.Compile(ctx, reg, src)
 		if err != nil {
 			return err
 		}
@@ -276,10 +264,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintf(out, "added %s at %s\n", sk.Name, sk.Version)
 			return nil
 		}
-		skills, err := lib.Skills(ctx)
+		skills, bad, err := lib.Skills(ctx)
 		if err != nil {
 			return err
 		}
+		warnSkipped(bad)
 		for _, sk := range skills {
 			fmt.Fprintf(out, "%-20s %.12s  %s\n", sk.Name, sk.Version, sk.Description)
 		}
@@ -345,14 +334,69 @@ func imageRegistryFor(repo string) *bobbin.ImageRegistry {
 	return &bobbin.ImageRegistry{Repo: repo}
 }
 
+// workerCommands registers every command but skills with a worker, and
+// returns their registry: the same commands registry() has, which
+// TestWorkerCommandsAreTheRegistry checks, since a run is checked
+// against registry() with the plan's skill pins.
+func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
+	reg := draft.DefaultRegistry()
+	if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
+		return nil, err
+	}
+	if err := bobbin.RegisterImage(reg, w, bobbin.Runner{}, images); err != nil {
+		return nil, err
+	}
+	if err := reed.Register(reg, w, browser); err != nil {
+		return nil, err
+	}
+	if err := pirn.Register(reg, w, claude); err != nil {
+		return nil, err
+	}
+	if err := pirn.RegisterAgent(reg, w, agent); err != nil {
+		return nil, err
+	}
+	return reg, nil
+}
+
+// compileRegistry is the commands a program compiled here may use:
+// registry(), and with a store the newest version of each of its skills,
+// as the worker on that store has them.
+func compileRegistry(ctx context.Context, store string) (*draftregistry.Registry, error) {
+	reg := registry()
+	if store == "" {
+		return reg, nil
+	}
+	s, err := warp.Open(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	skipped, err := (&treadle.Library{Store: s}).AddTo(ctx, reg)
+	warnSkipped(skipped)
+	return reg, err
+}
+
+// warnSkipped says which skills were left out, and why, on stderr.
+func warnSkipped(skipped []error) {
+	for _, err := range skipped {
+		fmt.Fprintln(os.Stderr, "loom: skill left out:", err)
+	}
+}
+
 // readFolder reads every regular file under dir, by "/"-separated path.
-// Symbolic links and other special files are refused: a skill is its
-// files' bytes.
+// Hidden files and folders (.git, .DS_Store) aren't part of a skill and
+// are left out; symbolic links and other special files are refused: a
+// skill is its files' bytes.
 func readFolder(dir string) (map[string][]byte, error) {
 	files := map[string][]byte{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if path != dir && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
