@@ -193,6 +193,10 @@ func TestImportCommands(t *testing.T) {
 	}
 	store := dir + "/store.git"
 	out.Reset()
+	if err := run(context.Background(), []string{"skills", "-store", store, "-trust", "file://" + dir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
 	if err := run(context.Background(), []string{"skills", "-store", store, "-import", "file://" + repo, "-path", "skills/pdf"}, &out); err != nil || !strings.HasPrefix(out.String(), "added pdf at ") {
 		t.Errorf("import: %v %s", err, out.String())
 	}
@@ -221,5 +225,111 @@ func TestImportCommands(t *testing.T) {
 		if err := run(context.Background(), bad, &out); err == nil {
 			t.Errorf("%v succeeded", bad)
 		}
+	}
+}
+
+// TestReviewCommands: an import from an untrusted repository waits; the
+// skills list shows it waiting; -review shows its files and diff with
+// terminal escapes made visible; -approve takes exactly the version shown
+// and makes it a command; -reject closes a review; -trust and -untrust
+// change which imports wait.
+func TestReviewCommands(t *testing.T) {
+	dir := t.TempDir()
+	repo := dir + "/repo"
+	os.MkdirAll(repo, 0o755)
+	git := func(a ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@x"}, a...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	os.WriteFile(repo+"/SKILL.md", []byte("---\nname: pdf\ndescription: Reads PDFs.\n---\nx\n"), 0o644)
+	os.WriteFile(repo+"/run.sh", []byte("echo \x1b]0;owned\x07 \u202e\n"), 0o644)
+	os.WriteFile(repo+"/notes.md", []byte("hidden\x00\n"), 0o644)
+	git("init", "-q", "-b", "main")
+	git("add", "-A")
+	git("commit", "-q", "-m", "x")
+	store := dir + "/store.git"
+	var out bytes.Buffer
+	do := func(args ...string) (string, error) {
+		out.Reset()
+		err := run(context.Background(), append([]string{"skills", "-store", store}, args...), &out)
+		return out.String(), err
+	}
+	got, err := do("-import", "file://"+repo)
+	if err != nil || !strings.Contains(got, "waits for review") {
+		t.Fatalf("import: %v %s", err, got)
+	}
+	version := strings.Fields(got)[2]
+	if got, _ := do(); !strings.Contains(got, "waiting for review") || !strings.Contains(got, "pdf") {
+		t.Errorf("list: %s", got)
+	}
+	got, err = do("-review", "pdf")
+	if err != nil || !strings.Contains(got, "a new skill") || !strings.Contains(got, "run.sh") || !strings.Contains(got, "+echo") ||
+		strings.ContainsAny(got, "\x1b\x07\u202e\x00") || !strings.Contains(got, `\u001b`) || !strings.Contains(got, `\u202e`) ||
+		!strings.Contains(got, "SKILL.md, in full:\n---\nname: pdf") || !strings.Contains(got, "read them yourself before approving:\n  notes.md") ||
+		!strings.Contains(got, "approve: loom skills -store "+store+" -approve pdf@"+version+"\n") {
+		t.Errorf("review: %v %q", err, got)
+	}
+	if _, err := do("-replacing", version); err == nil {
+		t.Error("-replacing without -approve passed")
+	}
+	if _, err := do("-compile"); err == nil {
+		t.Error("a stray flag passed")
+	}
+	if _, err := do("-approve", "pdf"); err == nil {
+		t.Error("approved without a version")
+	}
+	if _, err := do("-approve", "pdf@"+strings.Repeat("0", 40)); err == nil {
+		t.Error("approved a version that wasn't reviewed")
+	}
+	if got, err := do("-approve", "pdf@"+version); err != nil || !strings.HasPrefix(got, "approved pdf at "+version) {
+		t.Errorf("approve: %v %s", err, got)
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"compile", "-store", store, `(pdf "a.pdf")`}, &out); err != nil || !strings.Contains(out.String(), version) {
+		t.Errorf("compile after approval: %v %s", err, out.String())
+	}
+
+	os.WriteFile(repo+"/run.sh", []byte("echo two\n"), 0o644)
+	git("commit", "-q", "-am", "two")
+	got, _ = do("-import", "file://"+repo)
+	two := strings.Fields(got)[2]
+	// Approving a change needs the version the review diffed it from.
+	got, _ = do("-review", "pdf")
+	if !strings.Contains(got, " -approve pdf@"+two+" -replacing "+version+"\n") {
+		t.Errorf("review of a change: %s", got)
+	}
+	if _, err := do("-approve", "pdf@"+two); err == nil {
+		t.Error("approved a change without -replacing")
+	}
+	if got, err := do("-reject", "pdf@"+two); err != nil || !strings.HasPrefix(got, "rejected pdf") {
+		t.Errorf("reject: %v %s", err, got)
+	}
+	if got, _ := do(); strings.Contains(got, "waiting for review") {
+		t.Errorf("still waiting after rejection: %s", got)
+	}
+	if _, err := do("-trust", "https://github.com"); err == nil {
+		t.Error("trusted a whole host")
+	}
+	if _, err := do("-trust", "file://"+dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := do("-trusted"); strings.TrimSpace(got) != "file://"+dir {
+		t.Errorf("trusted: %q", got)
+	}
+	if got, err := do("-import", "file://"+repo); err != nil || !strings.HasPrefix(got, "added pdf at "+two) {
+		t.Errorf("trusted import: %v %s", err, got)
+	}
+	if _, err := do("-untrust", "file://"+dir+"/"); err == nil {
+		t.Error("untrusted a prefix that isn't trusted")
+	}
+	if _, err := do("-untrust", "file://"+dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := do("-trusted"); got != "" {
+		t.Errorf("after untrust: %q", got)
+	}
+	if _, err := do("-trust", "file://"+dir, "-review", "pdf"); err == nil {
+		t.Error("two actions at once passed")
 	}
 }
