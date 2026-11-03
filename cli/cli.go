@@ -942,8 +942,8 @@ func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
 		return err
 	}
 	if name == "ANTHROPIC_API_KEY" {
-		// Workers read this key when they start.
-		fmt.Fprintf(out, "Stored %s in your keychain (service %q). Restart heedle (or the worker) to use it.\n", name, pirn.KeychainService)
+		// Workers read this key for every request (pirn.Claude.KeyFrom).
+		fmt.Fprintf(out, "Stored %s in your keychain (service %q). Workers use it from their next step; no restart needed.\n", name, pirn.KeychainService)
 		return nil
 	}
 	fmt.Fprintf(out, "Stored %s in your keychain (service %q). Connectors that name %s use it from their next step; no restart needed.\n", name, pirn.KeychainService, name)
