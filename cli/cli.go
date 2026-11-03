@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -55,6 +56,7 @@ const usage = `usage:
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
+  loom secret  (set NAME | delete NAME)
 `
 
 // Run runs one loom command: args are the command's name and its
@@ -77,7 +79,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	resolve := fs.String("resolve", "", "merge: settle conflicting questions with ours, theirs or rerun")
 	browserImage := fs.String("browser-image", "", "worker: reed browser image ID for the browse command")
 	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
-	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY)")
+	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY, or the keychain: loom secret set ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
 	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store, or - for a SKILL.md on standard input")
@@ -92,7 +94,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	trust := fs.String("trust", "", "skills: a repository URL prefix (such as https://github.com/your-org) whose imports need no review")
 	untrust := fs.String("untrust", "", "skills: a trusted prefix to remove; later imports from it wait for review")
 	trusted := fs.Bool("trusted", false, "skills: list the trusted prefixes")
-	connectorsFile := fs.String("connectors", "", "worker: a JSON file of the MCP servers agent steps may be granted (tokens by environment variable name)")
+	connectorsFile := fs.String("connectors", "", "worker: a JSON file of the MCP servers agent steps may be granted (tokens by name: an environment variable, or a keychain secret set with `loom secret set NAME`)")
 	workflowID := fs.String("workflow", "", "writes: the run's workflow ID, as loom run prints it")
 	approveWrite := fs.String("approve", "", "skills: NAME@VERSION, the reviewed import to add as the skill's newest version; writes: NODE/ID, a write to approve")
 	declineWrite := fs.String("decline", "", "writes: NODE/ID, a write to decline")
@@ -102,6 +104,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	switch args[0] {
+	case "secret":
+		if fs.NArg() != 2 || (fs.Arg(0) != "set" && fs.Arg(0) != "delete") {
+			return errors.New("secret takes set NAME or delete NAME\n" + usage)
+		}
+		return secretCommand(ctx, out, fs.Arg(0), fs.Arg(1))
+
 	case "worker":
 		if *store == "" {
 			return errors.New("worker needs -store DIR")
@@ -116,12 +124,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
-		claude := pirn.Claude{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: *askModel}
+		claude := pirn.Claude{APIKey: pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY"), Model: *askModel}
 		connectors, err := readConnectors(*connectorsFile)
 		if err != nil {
 			return err
 		}
-		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors}
+		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault}
 		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
@@ -250,9 +258,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if fs.NArg() != 1 {
 			return errors.New("write takes one description, in quotes\n" + usage)
 		}
-		key := os.Getenv("ANTHROPIC_API_KEY")
+		key := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
 		if key == "" {
-			return errors.New("write asks Claude: set ANTHROPIC_API_KEY")
+			return errors.New("write asks Claude: run `loom secret set ANTHROPIC_API_KEY`, or set ANTHROPIC_API_KEY")
 		}
 		w := loom.Writer{Asker: pirn.Claude{APIKey: key, Model: *askModel}, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
 			return commandsFor(ctx, *store, registry())
@@ -348,9 +356,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		lib := &treadle.Library{Store: s}
 		cmd := "loom skills -store " + shellWord(*store)
 		if *createSkill != "" {
-			key := os.Getenv("ANTHROPIC_API_KEY")
+			key := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
 			if key == "" || *agentImage == "" {
-				return errors.New("-create runs an agent step: set ANTHROPIC_API_KEY and give -agent-image")
+				return errors.New("-create runs an agent step: store ANTHROPIC_API_KEY (loom secret set ANTHROPIC_API_KEY, or the variable) and give -agent-image")
 			}
 			agent := pirn.Agent{Claude: pirn.Claude{APIKey: key, Model: *askModel}, Runner: bobbin.Runner{}, Image: *agentImage}
 			files, res, err := treadle.Create(ctx, agent.Run, *createSkill)
@@ -743,3 +751,54 @@ func printWrites(out io.Writer, ws []loom.WriteOutcome) {
 
 // stdin is where -add - reads a SKILL.md; tests replace it.
 var stdin io.Reader = os.Stdin
+
+// vault is where workers and commands find secrets the environment
+// doesn't hold: the operating system's keychain. A variable for tests.
+var vault interface {
+	pirn.Vault
+	Store(ctx context.Context, name, value string) error
+	Delete(ctx context.Context, name string) error
+} = pirn.Keychain{}
+
+// isTerminal reports whether standard input is a terminal; a variable for
+// tests.
+var isTerminal = func() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// secretCommand stores a secret read from standard input in the keychain,
+// or deletes one. At a terminal the value isn't echoed (pirn.NoEcho), and
+// it is never an argument, so neither the screen, the shell's history nor
+// a process listing shows it.
+func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
+	if op == "delete" {
+		if err := vault.Delete(ctx, name); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Deleted %s from your keychain.\n", name)
+		return nil
+	}
+	if err := pirn.CheckSecret(name, "x"); err != nil {
+		return err
+	}
+	if isTerminal() {
+		fmt.Fprintf(out, "Paste %s and press Enter (it won't be shown): ", name)
+		if restore, err := noEcho(ctx); err == nil {
+			defer func() { restore(); fmt.Fprintln(out) }()
+		}
+	}
+	line, err := bufio.NewReader(io.LimitReader(stdin, pirn.MaxSecret+2)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	value := strings.TrimRight(line, "\r\n")
+	if err := vault.Store(ctx, name, value); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Stored %s in your keychain (service %q). Connectors that name %s use it from their next step; no restart needed.\n", name, pirn.KeychainService, name)
+	return nil
+}
+
+// noEcho is pirn.NoEcho; a variable for tests.
+var noEcho = pirn.NoEcho

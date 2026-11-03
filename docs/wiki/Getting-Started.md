@@ -87,6 +87,15 @@ The worker also runs pirn's `ask` when it has your Anthropic API key. Restart it
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/loom worker -store ~/heedle-store.git
 ```
 
+Or keep the key in your keychain (the macOS Keychain, or the Linux secret service through `secret-tool`) once, and start the worker without it: the worker reads the environment first, then the keychain. `secret set` asks for the value without showing it.
+
+```bash
+go run ./cmd/loom secret set ANTHROPIC_API_KEY
+go run ./cmd/loom worker -store ~/heedle-store.git
+```
+
+Connectors' keys work the same way: a connector that names `MAPS_KEY` finds it in the environment or the keychain from its next step. `loom secret delete NAME` removes one.
+
 Then in terminal 3:
 
 ```bash

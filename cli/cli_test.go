@@ -430,3 +430,63 @@ func TestInv_WriterSeesEveryCommand(t *testing.T) {
 		t.Errorf("triage: %q", about["triage"])
 	}
 }
+
+type fakeKeychain map[string]string
+
+func (f fakeKeychain) Lookup(_ context.Context, name string) (string, bool, error) {
+	v, ok := f[name]
+	return v, ok, nil
+}
+func (f fakeKeychain) Store(_ context.Context, name, value string) error {
+	if err := pirn.CheckSecret(name, value); err != nil {
+		return err
+	}
+	f[name] = value
+	return nil
+}
+func (f fakeKeychain) Delete(_ context.Context, name string) error { delete(f, name); return nil }
+
+// TestInv_SecretSetNeverShowsTheValue: `loom secret set NAME` reads the
+// value from standard input, never an argument; at a terminal it turns
+// echo off first and back on after, even when storing fails; nothing it
+// prints holds the value; delete removes it. (Roadmap 7.1.)
+func TestInv_SecretSetNeverShowsTheValue(t *testing.T) {
+	ctx := context.Background()
+	kc := fakeKeychain{}
+	oldVault, oldTerm, oldNoEcho := vault, isTerminal, noEcho
+	t.Cleanup(func() { vault, isTerminal, noEcho, stdin = oldVault, oldTerm, oldNoEcho, os.Stdin })
+	vault = kc
+	var calls []string
+	noEcho = func(context.Context) (func(), error) {
+		calls = append(calls, "-echo")
+		return func() { calls = append(calls, "echo") }, nil
+	}
+	isTerminal = func() bool { return true }
+
+	const value = "AIzaSy-maps-key.123"
+	stdin = strings.NewReader(value + "\n")
+	var out bytes.Buffer
+	if err := Run(ctx, []string{"secret", "set", "MAPS_KEY"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if kc["MAPS_KEY"] != value || strings.Contains(out.String(), value) || strings.Join(calls, ",") != "-echo,echo" {
+		t.Errorf("stored %q, printed %q, stty %v", kc["MAPS_KEY"], out.String(), calls)
+	}
+
+	calls = nil
+	stdin = strings.NewReader("has space\n")
+	if err := Run(ctx, []string{"secret", "set", "MAPS_KEY"}, &out); err == nil || strings.Join(calls, ",") != "-echo,echo" {
+		t.Errorf("a refused value: %v, stty %v (echo must come back)", err, calls)
+	}
+	for _, bad := range [][]string{{"secret", "set"}, {"secret", "get", "MAPS_KEY"}, {"secret", "set", "MAPS_KEY", value}, {"secret", "set", "bad-name"}} {
+		if err := Run(ctx, bad, &out); err == nil {
+			t.Errorf("%v: accepted", bad)
+		}
+	}
+	if kc["MAPS_KEY"] != value {
+		t.Error("a refused command changed the secret")
+	}
+	if err := Run(ctx, []string{"secret", "delete", "MAPS_KEY"}, &out); err != nil || len(kc) != 0 {
+		t.Errorf("delete: %v %v", err, kc)
+	}
+}
