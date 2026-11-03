@@ -65,7 +65,10 @@ The commit message is `run <workflow ID>`, with Git trailers:
 ```text
 Shuttle-Workflow: <Temporal workflow ID>
 Shuttle-Run: <Temporal run ID>
+Loom-Program: <the program's own workflow ID>
 ```
+
+`Loom-Program` is `WorkflowID` of the run's program, plan and ref: the same for every run of it, including a scheduled run, whose workflow ID also has the time Temporal adds. It's how a run finds the previous run of its program (`TestInv_RunsNameTheirProgram`); records made before it was added are matched by `Shuttle-Workflow`.
 
 The commit time is the workflow's clock at the moment of recording, never the wall clock, so recording the same run twice produces the same commit.
 
@@ -87,7 +90,7 @@ A decision is a signal to the run (`WriteSignal`, a `WriteDecision`); `loom writ
 
 ## Schedules
 
-A schedule runs a program again and again: a [Temporal Schedule](https://docs.temporal.io/schedule) (`CreateSchedule`) whose action starts `RunWorkflow` with exactly the input `Submit` would give it, compiled once when the schedule is made, so every run is recorded like any other and its writes wait for approval like any other. Its Temporal ID is `loom-schedule-<name>` (a name is lower-case letters, digits and hyphens, at most 40); each run's workflow ID is the program's (`WorkflowID`) with the time Temporal adds. It runs every so often (`-every`, at least a minute) or at the times a five-field cron expression names (`-cron`, in `-tz`, UTC by default). One run at a time: a run still going when the next is due skips it. A run missed by under 10 minutes (`ScheduleCatchup`; the machine asleep, Temporal down) still starts; older ones are skipped. `ScheduleOptions` checks everything `Submit` does, and the name and times, before Temporal is asked (`TestInv_SchedulesStartRunsLikeSubmit`).
+A schedule runs a program again and again: a [Temporal Schedule](https://docs.temporal.io/schedule) (`CreateSchedule`) whose action starts `RunWorkflow` with exactly the input `Submit` would give it, compiled once when the schedule is made, so every run is recorded like any other and its writes wait for approval like any other. Its Temporal ID is `loom-schedule-<name>` (a name is lower-case letters, digits and hyphens, at most 40); each run's workflow ID is the program's (`WorkflowID`) with the time Temporal adds, and its record names the program (`Loom-Program`), so it finds the previous run of the program. It runs every so often (`-every`, whole minutes, at least one), counted from when it was made, so "every 24h" made at 14:25 runs at 14:25; or at the times a five-field cron expression names (`-cron`: `*`, numbers, ranges `N-M`, lists and `/STEP` within each field's range, weekday 0 or 7 Sunday; no names or `@daily`), in `-tz` (an IANA name; UTC by default; only with cron). One run at a time: a run still going when the next is due skips it, while `-run` (run now) waits for it and then starts. A run missed by under 10 minutes (`ScheduleCatchup`; the machine asleep, Temporal down) still starts; older ones are skipped. A run that fails pauses the schedule, with Temporal's note saying so, rather than failing again and again; resume it once fixed (a skill its plan pinned may have gone, say). `ScheduleOptions` checks everything `Submit` does, and the name and times, before Temporal is asked (`TestInv_SchedulesStartRunsLikeSubmit`). `Schedules` lists only schedules on the worker's task queue, as the runs list shows only its runs.
 
 ```bash
 go run ./cmd/loom schedule -name weekday-digest -cron "0 9 * * 1-5" -tz Europe/Lisbon '(pipe (echo "weekly digest") echo)'
@@ -97,7 +100,7 @@ go run ./cmd/loom schedules -pause weekday-digest
 go run ./cmd/loom schedules -delete weekday-digest
 ```
 
-`schedules` lists each with when it runs, whether it's paused, its next run and how many runs it has started; `-run` starts one now, and `-delete` removes the schedule (its runs' records stay). Temporal's test environment has no schedules, so heedle's end-to-end test makes, runs and deletes one on a real Temporal server.
+`schedules` lists each with when it runs, whether it's paused and why, its next run and how many recent runs Temporal keeps for it; `-run` starts one now, and `-delete` removes the schedule (its runs' records stay). Temporal's test environment has no schedules, so heedle's end-to-end test makes, runs and deletes one on a real Temporal server.
 
 ## Changing skills
 
