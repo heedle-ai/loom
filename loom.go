@@ -454,16 +454,8 @@ func Submit(ctx context.Context, c client.Client, taskQueue string, in RunInput)
 	if in.Ref == "" {
 		in.Ref = DefaultRef
 	}
-	if err := in.Plan.Validate(); err != nil {
-		return nil, fmt.Errorf("loom: %w", err)
-	}
-	if err := warp.CheckRef(ctx, in.Ref); err != nil {
+	if err := checkRun(ctx, in); err != nil {
 		return nil, err
-	}
-	for _, n := range in.Plan.Nodes {
-		if err := warp.ValidName(string(n.ID)); err != nil {
-			return nil, err
-		}
 	}
 	id, err := WorkflowID(ctx, in)
 	if err != nil {
