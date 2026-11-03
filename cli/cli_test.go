@@ -553,3 +553,24 @@ func TestMain(m *testing.M) {
 	vault = fakeKeychain{}
 	os.Exit(m.Run())
 }
+
+// TestInv_SecretSetSaysNoRestart: storing the Anthropic key says it's used
+// from the next step, as it is (workers read it per request), not to
+// restart (it said so after workers stopped needing it: the first brew
+// install).
+func TestInv_SecretSetSaysNoRestart(t *testing.T) {
+	kc := fakeKeychain{}
+	oldVault, oldTerm := vault, isTerminal
+	t.Cleanup(func() { vault, isTerminal, stdin = oldVault, oldTerm, os.Stdin })
+	vault, isTerminal = kc, func() bool { return false }
+	for _, name := range []string{"ANTHROPIC_API_KEY", "MAPS_KEY"} {
+		stdin = strings.NewReader("k\n")
+		var out bytes.Buffer
+		if err := Run(context.Background(), []string{"secret", "set", name}, &out); err != nil {
+			t.Fatal(err)
+		}
+		if s := out.String(); strings.Contains(strings.ToLower(s), "restart heedle") || !strings.Contains(s, "no restart needed") {
+			t.Errorf("%s: %q", name, s)
+		}
+	}
+}
