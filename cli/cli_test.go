@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/testsuite"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -448,8 +450,9 @@ func (f fakeKeychain) Delete(_ context.Context, name string) error { delete(f, n
 
 // TestInv_SecretSetNeverShowsTheValue: `loom secret set NAME` reads the
 // value from standard input, never an argument; at a terminal it turns
-// echo off first and back on after, even when storing fails; nothing it
-// prints holds the value; delete removes it. (Roadmap 7.1.)
+// echo off first and back on after, even when storing fails or Ctrl-C
+// ends the prompt, and reads nothing if it can't; nothing it prints holds
+// the value; delete removes it. (Roadmap 7.1; review 26.)
 func TestInv_SecretSetNeverShowsTheValue(t *testing.T) {
 	ctx := context.Background()
 	kc := fakeKeychain{}
@@ -489,4 +492,28 @@ func TestInv_SecretSetNeverShowsTheValue(t *testing.T) {
 	if err := Run(ctx, []string{"secret", "delete", "MAPS_KEY"}, &out); err != nil || len(kc) != 0 {
 		t.Errorf("delete: %v %v", err, kc)
 	}
+
+	// Ctrl-C at the prompt ends it, stores nothing, and turns echo back
+	// on (review 26).
+	calls = nil
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	stdin = pr
+	cctx, cancel := context.WithCancel(ctx)
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if err := Run(cctx, []string{"secret", "set", "MAPS_KEY"}, &out); err == nil || len(kc) != 0 || strings.Join(calls, ",") != "-echo,echo" {
+		t.Errorf("Ctrl-C: %v, stored %v, stty %v", err, kc, calls)
+	}
+	// A terminal whose echo can't be turned off is never read from.
+	noEcho = func(context.Context) (func(), error) { return nil, errors.New("not a tty") }
+	stdin = strings.NewReader(value + "\n")
+	if err := Run(ctx, []string{"secret", "set", "MAPS_KEY"}, &out); err == nil || len(kc) != 0 {
+		t.Errorf("echo on: %v, stored %v", err, kc)
+	}
+}
+
+// TestMain keeps every test off the keychain of the machine running it.
+func TestMain(m *testing.M) {
+	vault = fakeKeychain{}
+	os.Exit(m.Run())
 }
