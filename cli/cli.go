@@ -809,8 +809,9 @@ func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
 		err  error
 	}
 	got := make(chan read, 1)
+	in := stdin
 	go func() {
-		line, err := bufio.NewReader(io.LimitReader(stdin, pirn.MaxSecret+2)).ReadString('\n')
+		line, err := bufio.NewReader(io.LimitReader(in, pirn.MaxSecret+2)).ReadString('\n')
 		got <- read{line, err}
 	}()
 	var r read
