@@ -124,7 +124,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
-		claude := pirn.Claude{APIKey: pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY"), Model: *askModel}
+		key, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+		if err != nil {
+			// The worker still runs every step that doesn't ask Claude.
+			fmt.Fprintf(out, "ANTHROPIC_API_KEY: %v; ask and agent steps will fail until the worker can read it\n", err)
+		}
+		claude := pirn.Claude{APIKey: key, Model: *askModel}
 		connectors, err := readConnectors(*connectorsFile)
 		if err != nil {
 			return err
@@ -258,7 +263,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if fs.NArg() != 1 {
 			return errors.New("write takes one description, in quotes\n" + usage)
 		}
-		key := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+		key, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+		if err != nil {
+			return err
+		}
 		if key == "" {
 			return errors.New("write asks Claude: run `loom secret set ANTHROPIC_API_KEY`, or set ANTHROPIC_API_KEY")
 		}
@@ -356,7 +364,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		lib := &treadle.Library{Store: s}
 		cmd := "loom skills -store " + shellWord(*store)
 		if *createSkill != "" {
-			key := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+			key, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+			if err != nil {
+				return err
+			}
 			if key == "" || *agentImage == "" {
 				return errors.New("-create runs an agent step: store ANTHROPIC_API_KEY (loom secret set ANTHROPIC_API_KEY, or the variable) and give -agent-image")
 			}
@@ -783,18 +794,42 @@ func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
 		return err
 	}
 	if isTerminal() {
-		fmt.Fprintf(out, "Paste %s and press Enter (it won't be shown): ", name)
-		if restore, err := noEcho(ctx); err == nil {
-			defer func() { restore(); fmt.Fprintln(out) }()
+		// Never show what was promised hidden (review 26).
+		restore, err := noEcho(ctx)
+		if err != nil {
+			return fmt.Errorf("can't hide what you type (stty: %v), so nothing was read", err)
 		}
+		fmt.Fprintf(out, "Paste %s and press Enter (it won't be shown): ", name)
+		defer func() { restore(); fmt.Fprintln(out) }()
 	}
-	line, err := bufio.NewReader(io.LimitReader(stdin, pirn.MaxSecret+2)).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
+	// Read beside ctx, so Ctrl-C (which cancels it) ends the prompt and
+	// the deferred restore turns echo back on (review 26).
+	type read struct {
+		line string
+		err  error
 	}
-	value := strings.TrimRight(line, "\r\n")
+	got := make(chan read, 1)
+	go func() {
+		line, err := bufio.NewReader(io.LimitReader(stdin, pirn.MaxSecret+2)).ReadString('\n')
+		got <- read{line, err}
+	}()
+	var r read
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("nothing stored: %w", ctx.Err())
+	case r = <-got:
+	}
+	if r.err != nil && !errors.Is(r.err, io.EOF) {
+		return r.err
+	}
+	value := strings.TrimRight(r.line, "\r\n")
 	if err := vault.Store(ctx, name, value); err != nil {
 		return err
+	}
+	if name == "ANTHROPIC_API_KEY" {
+		// Workers read this key when they start.
+		fmt.Fprintf(out, "Stored %s in your keychain (service %q). Restart heedle (or the worker) to use it.\n", name, pirn.KeychainService)
+		return nil
 	}
 	fmt.Fprintf(out, "Stored %s in your keychain (service %q). Connectors that name %s use it from their next step; no restart needed.\n", name, pirn.KeychainService, name)
 	return nil
