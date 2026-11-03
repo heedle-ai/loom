@@ -131,15 +131,22 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			// The worker still runs every step that doesn't ask Claude.
 			fmt.Fprintf(out, "ANTHROPIC_API_KEY: %v; ask and agent steps will fail until the worker can read it\n", err)
 		}
-		claude := pirn.Claude{Model: *askModel, KeyFrom: func(ctx context.Context) (string, error) {
-			return pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
-		}}
-		connectors, err := readConnectors(*connectorsFile)
+		// Each keeps what it last read if a read fails: a keychain locked
+		// for a moment, or a connectors file mid-save (review 27).
+		key := pirn.LastGood(func() (string, error) {
+			return pirn.LookupSecret(context.Background(), vault, "ANTHROPIC_API_KEY")
+		})
+		loadConnectors := pirn.LastGood(func() (pirn.Connectors, error) { return readConnectors(*connectorsFile) })
+		claude := pirn.Claude{Model: *askModel, KeyFrom: func(context.Context) (string, error) { return key() }}
+		connectors, err := loadConnectors()
 		if err != nil {
 			return err
 		}
+		if _, err := os.Stat(*connectorsFile); *connectorsFile != "" && err != nil {
+			fmt.Fprintf(out, "connectors: %s isn't there yet, so no connectors until it is\n", *connectorsFile)
+		}
 		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault,
-			LoadConnectors: func() (pirn.Connectors, error) { return readConnectors(*connectorsFile) }}
+			LoadConnectors: loadConnectors}
 		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
