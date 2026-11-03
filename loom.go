@@ -43,6 +43,11 @@ const (
 	// Trailer keys on every run commit.
 	TrailerWorkflow = "Shuttle-Workflow"
 	TrailerRun      = "Shuttle-Run"
+	// TrailerProgram is the program's own workflow ID (WorkflowID of its
+	// input), the same for every run of it: a scheduled run's workflow ID
+	// also has the time Temporal adds, so this is how a run finds the
+	// previous run of the same program (review 30).
+	TrailerProgram = "Loom-Program"
 
 	// MemoRef is the Temporal memo field Submit sets to the run's ref, so
 	// a UI listing executions can tell which history each one belongs to.
@@ -358,6 +363,10 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		return "", err
 	}
 
+	programID, err := WorkflowID(ctx, RunInput{Program: in.Program, Plan: in.Plan, Ref: in.Ref})
+	if err != nil {
+		return "", err
+	}
 	commit, err := s.Commit(ctx, warp.CommitSpec{
 		Tree:    tree,
 		Parents: parents,
@@ -365,6 +374,7 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		Trailers: []warp.Trailer{
 			{Key: TrailerWorkflow, Value: in.WorkflowID},
 			{Key: TrailerRun, Value: in.RunID},
+			{Key: TrailerProgram, Value: programID},
 		},
 		Author: warp.Signature{Name: "loom", Email: "loom@heedle.ai", When: in.At},
 	})

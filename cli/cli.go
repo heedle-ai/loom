@@ -298,7 +298,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				return err
 			}
 		}
-		ss, err := loom.Schedules(ctx, c)
+		ss, err := loom.Schedules(ctx, c, *queue)
 		if err != nil {
 			return err
 		}
@@ -975,6 +975,9 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 		state, next := "on", "-"
 		if s.Paused {
 			state = "paused"
+			if s.Note != "" {
+				state = "paused (" + s.Note + ")"
+			}
 		}
 		if len(s.Next) > 0 {
 			next = s.Next[0].Local().Format(time.RFC3339)
@@ -983,6 +986,6 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 		if len(prog) > 60 {
 			prog = prog[:60] + "…"
 		}
-		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d runs  %s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog)
+		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d recent runs  %s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog)
 	}
 }
