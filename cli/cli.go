@@ -58,6 +58,8 @@ const usage = `usage:
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
   loom secret  (set NAME | delete NAME | delete --all)
+  loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
+  loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
 `
 
 // Run runs one loom command: args are the command's name and its
@@ -99,6 +101,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	workflowID := fs.String("workflow", "", "writes: the run's workflow ID, as loom run prints it")
 	approveWrite := fs.String("approve", "", "skills: NAME@VERSION, the reviewed import to add as the skill's newest version; writes: NODE/ID, a write to approve")
 	declineWrite := fs.String("decline", "", "writes: NODE/ID, a write to decline")
+	scheduleNameFlag := fs.String("name", "", "schedule: the schedule's name (lower-case letters, digits and hyphens)")
+	every := fs.Duration("every", 0, "schedule: run every so often, such as 1h or 24h (at least 1m)")
+	cron := fs.String("cron", "", `schedule: run at cron times instead, five fields, such as "0 9 * * 1-5"`)
+	tz := fs.String("tz", "", "schedule: the time zone cron times are in, such as Europe/Lisbon (default UTC)")
+	pauseFlag := fs.String("pause", "", "schedules: the schedule to pause")
+	resumeFlag := fs.String("resume", "", "schedules: the schedule to resume")
+	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
+	runNow := fs.String("run", "", "schedules: the schedule to run once now")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -233,6 +243,66 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		for _, id := range ids {
 			fmt.Fprintf(out, "%-8s %s\n", id, res.Outputs[id])
 		}
+		return nil
+
+	case "schedule":
+		if *scheduleNameFlag == "" {
+			return errors.New("schedule needs -name, and -every or -cron\n" + usage)
+		}
+		src, err := program(fs, *file)
+		if err != nil {
+			return err
+		}
+		reg, err := compileRegistry(ctx, *store)
+		if err != nil {
+			return err
+		}
+		p, err := loom.Compile(ctx, reg, src)
+		if err != nil {
+			return err
+		}
+		spec := loom.ScheduleSpec{Every: *every, Cron: *cron, TimeZone: *tz}
+		in := loom.RunInput{Program: src, Plan: p, Ref: *ref}
+		if _, err := loom.ScheduleOptions(ctx, *queue, *scheduleNameFlag, in, spec); err != nil {
+			return err // refused before Temporal is asked
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		if err := loom.CreateSchedule(ctx, c, *queue, *scheduleNameFlag, in, spec); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "schedule %s: %s\n", *scheduleNameFlag, describeSpec(spec))
+		return nil
+
+	case "schedules":
+		actions := map[string]string{"pause": *pauseFlag, "resume": *resumeFlag, "delete": *deleteFlag, "run": *runNow}
+		var action, name string
+		for a, n := range actions {
+			if n != "" {
+				if action != "" {
+					return errors.New("schedules takes at most one of -pause, -resume, -delete or -run\n" + usage)
+				}
+				action, name = a, n
+			}
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		if action != "" {
+			if err := loom.ScheduleAction(ctx, c, name, action); err != nil {
+				return err
+			}
+		}
+		ss, err := loom.Schedules(ctx, c)
+		if err != nil {
+			return err
+		}
+		printSchedules(out, ss)
 		return nil
 
 	case "branch", "merge":
@@ -882,3 +952,37 @@ func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
 
 // noEcho is pirn.NoEcho; a variable for tests.
 var noEcho = pirn.NoEcho
+
+// describeSpec says when a schedule runs, for people.
+func describeSpec(s loom.ScheduleSpec) string {
+	if s.Every != 0 {
+		return "every " + s.Every.String()
+	}
+	tz := s.TimeZone
+	if tz == "" {
+		tz = "UTC"
+	}
+	return fmt.Sprintf("at %q (%s)", s.Cron, tz)
+}
+
+// printSchedules lists schedules: name, when, state, next run, program.
+func printSchedules(out io.Writer, ss []loom.Schedule) {
+	if len(ss) == 0 {
+		fmt.Fprintln(out, "no schedules")
+		return
+	}
+	for _, s := range ss {
+		state, next := "on", "-"
+		if s.Paused {
+			state = "paused"
+		}
+		if len(s.Next) > 0 {
+			next = s.Next[0].Local().Format(time.RFC3339)
+		}
+		prog := strings.Join(strings.Fields(s.Program), " ")
+		if len(prog) > 60 {
+			prog = prog[:60] + "…"
+		}
+		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d runs  %s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog)
+	}
+}

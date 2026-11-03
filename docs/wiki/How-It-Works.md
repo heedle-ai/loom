@@ -85,6 +85,20 @@ An agent step granted a connector's write tool (such as sending an email) never 
 
 A decision is a signal to the run (`WriteSignal`, a `WriteDecision`); `loom writes -workflow ID -approve n0/w1` (or `-decline`) sends one, as drawdown's Approve and Decline buttons do, and `loom writes -workflow ID` lists a run's writes so far (`WritesQuery`). Each approved write runs as pirn's `PirnWrite` activity with one attempt: Temporal never retries it, and a worker that dies mid-write leaves it `failed`, so a write runs at most once (Soundness law 15). Then the record keeps every write and what came of it in `writes.json`; a run with no writes has none. `loom run` prints them after the outputs. A later step in the same run never sees a write's result: writes come after all the steps. A decision is final: the first one for a write stands. A decision sent before the run's writes were known is dropped, so a person decides only a write they could see, and a signal that isn't a decision is ignored. A write runs at most once **per run**: a new run of the same program, or a merge that re-runs a question (`-resolve rerun`), runs its agent steps again and queues their writes again, each waiting for its own approval if its connector says so.
 
+## Schedules
+
+A schedule runs a program again and again: a [Temporal Schedule](https://docs.temporal.io/schedule) (`CreateSchedule`) whose action starts `RunWorkflow` with exactly the input `Submit` would give it, compiled once when the schedule is made, so every run is recorded like any other and its writes wait for approval like any other. Its Temporal ID is `loom-schedule-<name>` (a name is lower-case letters, digits and hyphens, at most 40); each run's workflow ID is the program's (`WorkflowID`) with the time Temporal adds. It runs every so often (`-every`, at least a minute) or at the times a five-field cron expression names (`-cron`, in `-tz`, UTC by default). One run at a time: a run still going when the next is due skips it. A run missed by under 10 minutes (`ScheduleCatchup`; the machine asleep, Temporal down) still starts; older ones are skipped. `ScheduleOptions` checks everything `Submit` does, and the name and times, before Temporal is asked (`TestInv_SchedulesStartRunsLikeSubmit`).
+
+```bash
+go run ./cmd/loom schedule -name weekday-digest -cron "0 9 * * 1-5" -tz Europe/Lisbon '(pipe (echo "weekly digest") echo)'
+go run ./cmd/loom schedules
+go run ./cmd/loom schedules -run weekday-digest
+go run ./cmd/loom schedules -pause weekday-digest
+go run ./cmd/loom schedules -delete weekday-digest
+```
+
+`schedules` lists each with when it runs, whether it's paused, its next run and how many runs it has started; `-run` starts one now, and `-delete` removes the schedule (its runs' records stay). Temporal's test environment has no schedules, so heedle's end-to-end test makes, runs and deletes one on a real Temporal server.
+
 ## Changing skills
 
 A worker's skills ([treadle](https://github.com/heedle-ai/treadle/wiki)) change in two ways: `loom skills` on the worker's store, or `SkillsWorkflow` (`loom.ChangeSkills`), which runs one `LoomSkillsChange` activity on a worker. drawdown uses the workflow, since it never writes to the store itself. A change is one of:
