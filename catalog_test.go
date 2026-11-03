@@ -1,10 +1,12 @@
 package loom_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.temporal.io/sdk/testsuite"
@@ -64,11 +66,23 @@ func TestInv_CatalogsAreListedOnAWorker(t *testing.T) {
 	if e := byName["skills/pdf"]; e.Name != "pdf" || e.Description != "Reads PDFs." || e.Source.Repo != repo || e.Source.Commit == "" || e.Problem != "" {
 		t.Errorf("pdf %+v", e)
 	}
-	if e := byName["skills/oddly"]; e.Problem == "" {
+	if e := byName["skills/oddly"]; e.Problem == "" || strings.HasPrefix(e.Problem, "treadle:") {
 		t.Errorf("a misnamed skill has no problem: %+v", e)
 	}
 	if _, err := listCatalog(t, treadle.Source{Repo: repo, Path: "skills/pdf"}); !refused(err) {
 		t.Errorf("a folder's link: %v", err)
+	}
+
+	// Review 24: 500 skills with long descriptions passed Temporal's 2 MiB limit.
+	long := map[string]string{}
+	for i := 0; i < 400; i++ {
+		n := fmt.Sprintf("l%03d", i)
+		long[n] = md(n, strings.Repeat("🧵", 1000))
+	}
+	c, err = listCatalog(t, treadle.Source{Repo: skillsRepo(t, long)})
+	b, _ := json.Marshal(c)
+	if err != nil || len(b) > loom.MaxCatalogBytes+1024 || c.Omitted == 0 || len(c.Entries)+c.Omitted != 400 {
+		t.Errorf("long descriptions: %d bytes, %d entries, %d omitted, %v", len(b), len(c.Entries), c.Omitted, err)
 	}
 
 	many := map[string]string{}

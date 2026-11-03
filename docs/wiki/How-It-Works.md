@@ -101,7 +101,7 @@ A refusal (an invalid skill or source, a repository or branch that isn't there, 
 
 ### Browsing a repository's skills
 
-`CatalogWorkflow` (`loom.ListSkills`) lists the skills a repository holds, on a worker, the same way `loom skills -catalog LINK` does on the command line: `treadle.Catalog` fetches only the `SKILL.md` files, up to three folders down, and gives each skill's name, description and source, or the problem that keeps it from being imported. drawdown's **Browse a repository** uses it, then imports the skills you pick one by one with `import`, so each waits for review like any other import from a repository that isn't trusted. A listing has at most `MaxCatalogEntries` (500) skills, and counts the rest (`Omitted`); a link to a folder rather than a repository is refused; a listing that fails to fetch is tried once more, within `CatalogTimeout`. Listing changes nothing.
+`CatalogWorkflow` (`loom.ListSkills`) lists the skills a repository holds, on a worker, the same way `loom skills -catalog LINK` does on the command line: `treadle.Catalog` fetches only the `SKILL.md` files, up to three folders down, and gives each skill's name, description and source, or the problem that keeps it from being imported. drawdown's **Browse a repository** uses it, then imports the skills you pick one by one with `import`, so each waits for review like any other import from a repository that isn't trusted. A listing has at most `MaxCatalogEntries` (500) skills in at most `MaxCatalogBytes` (1 MiB) of JSON, well under Temporal's 2 MiB payload limit, and counts the rest (`Omitted`); a link to a folder rather than a repository is refused; a listing that fails to fetch is tried once more, within `CatalogTimeout`. Listing changes nothing.
 
 ## Writing programs
 
