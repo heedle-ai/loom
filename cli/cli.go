@@ -57,7 +57,7 @@ const usage = `usage:
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
-  loom secret  (set NAME | delete NAME)
+  loom secret  (set NAME | delete NAME | delete --all)
 `
 
 // Run runs one loom command: args are the command's name and its
@@ -107,7 +107,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	switch args[0] {
 	case "secret":
 		if fs.NArg() != 2 || (fs.Arg(0) != "set" && fs.Arg(0) != "delete") {
-			return errors.New("secret takes set NAME or delete NAME\n" + usage)
+			return errors.New("secret takes set NAME, delete NAME or delete --all\n" + usage)
+		}
+		if fs.Arg(0) == "delete" && (fs.Arg(1) == "--all" || fs.Arg(1) == "-all") {
+			return deleteAllSecrets(ctx, out)
 		}
 		return secretCommand(ctx, out, fs.Arg(0), fs.Arg(1))
 
@@ -785,7 +788,32 @@ var vault interface {
 	pirn.Vault
 	Store(ctx context.Context, name, value string) error
 	Delete(ctx context.Context, name string) error
+	DeleteAll(ctx context.Context) (int, error)
 } = pirn.Keychain{}
+
+// deleteAllSecrets deletes every key heedle keeps in the keychain (its
+// service, pirn.KeychainService), as when uninstalling. At a terminal it
+// asks first; a script (as an uninstaller is) isn't asked.
+func deleteAllSecrets(ctx context.Context, out io.Writer) error {
+	if isTerminal() {
+		fmt.Fprintf(out, "Delete every key heedle keeps in your keychain (service %q)? This can't be undone. Type yes: ", pirn.KeychainService)
+		line, _ := bufio.NewReader(io.LimitReader(stdin, 64)).ReadString('\n')
+		if strings.TrimSpace(line) != "yes" {
+			fmt.Fprintln(out, "Nothing deleted.")
+			return nil
+		}
+	}
+	n, err := vault.DeleteAll(ctx)
+	if err != nil {
+		return err
+	}
+	if n < 0 {
+		fmt.Fprintln(out, "Deleted every heedle key from your keychain.")
+	} else {
+		fmt.Fprintf(out, "Deleted %d heedle key%s from your keychain.\n", n, map[bool]string{true: "", false: "s"}[n == 1])
+	}
+	return nil
+}
 
 // isTerminal reports whether standard input is a terminal; a variable for
 // tests.

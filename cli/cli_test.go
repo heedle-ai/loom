@@ -452,6 +452,37 @@ func (f fakeKeychain) Store(_ context.Context, name, value string) error {
 	return nil
 }
 func (f fakeKeychain) Delete(_ context.Context, name string) error { delete(f, name); return nil }
+func (f fakeKeychain) DeleteAll(context.Context) (int, error) {
+	n := len(f)
+	clear(f)
+	return n, nil
+}
+
+// TestInv_DeleteAllAsksAtATerminal: `loom secret delete --all` deletes
+// every heedle key only after "yes" at a terminal, and at once from a
+// script, as an uninstaller runs it. (Roadmap 7.1.)
+func TestInv_DeleteAllAsksAtATerminal(t *testing.T) {
+	ctx := context.Background()
+	kc := fakeKeychain{"A": "1", "B": "2"}
+	oldVault, oldTerm := vault, isTerminal
+	t.Cleanup(func() { vault, isTerminal, stdin = oldVault, oldTerm, os.Stdin })
+	vault = kc
+	var out bytes.Buffer
+	isTerminal = func() bool { return true }
+	stdin = strings.NewReader("no\n")
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, &out); err != nil || len(kc) != 2 {
+		t.Errorf("not yes: %v %v", err, kc)
+	}
+	stdin = strings.NewReader("yes\n")
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, &out); err != nil || len(kc) != 0 || !strings.Contains(out.String(), "Deleted 2 heedle keys") {
+		t.Errorf("yes: %v %v %q", err, kc, out.String())
+	}
+	kc["C"] = "3"
+	isTerminal = func() bool { return false }
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, &out); err != nil || len(kc) != 0 {
+		t.Errorf("from a script: %v %v", err, kc)
+	}
+}
 
 // TestInv_SecretSetNeverShowsTheValue: `loom secret set NAME` reads the
 // value from standard input, never an argument; at a terminal it turns
