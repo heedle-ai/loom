@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -124,17 +125,21 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
-		key, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
-		if err != nil {
+		// The key and the connectors are read again for every step, so a key
+		// stored or a connector added while the worker runs needs no restart.
+		if _, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY"); err != nil {
 			// The worker still runs every step that doesn't ask Claude.
 			fmt.Fprintf(out, "ANTHROPIC_API_KEY: %v; ask and agent steps will fail until the worker can read it\n", err)
 		}
-		claude := pirn.Claude{APIKey: key, Model: *askModel}
+		claude := pirn.Claude{Model: *askModel, KeyFrom: func(ctx context.Context) (string, error) {
+			return pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY")
+		}}
 		connectors, err := readConnectors(*connectorsFile)
 		if err != nil {
 			return err
 		}
-		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault}
+		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault,
+			LoadConnectors: func() (pirn.Connectors, error) { return readConnectors(*connectorsFile) }}
 		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
@@ -711,12 +716,16 @@ func commandsFor(ctx context.Context, store string, base *draftregistry.Registry
 	return base, loom.Commands(base, known), nil
 }
 
-// readConnectors reads a worker's connectors file, if it has one.
+// readConnectors reads a worker's connectors file, if it has one: a
+// file that isn't there (yet) is no connectors.
 func readConnectors(path string) (pirn.Connectors, error) {
 	if path == "" {
 		return nil, nil
 	}
 	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil // not made yet: no connectors until it is
+	}
 	if err != nil {
 		return nil, err
 	}
