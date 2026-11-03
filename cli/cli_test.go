@@ -387,6 +387,11 @@ func TestInv_WritesCommand(t *testing.T) {
 	if cs, err := readConnectors(""); err != nil || cs != nil {
 		t.Errorf("no file: %v %v", cs, err)
 	}
+	// A file not made yet is no connectors: the worker reads it before
+	// every step, so it may come later.
+	if cs, err := readConnectors(dir + "/later.json"); err != nil || cs != nil {
+		t.Errorf("a file not made yet: %v %v", cs, err)
+	}
 	for _, bad := range [][]string{{"writes"}, {"writes", "-workflow", "x", "-approve", "n0/w1", "-decline", "n0/w1"}} {
 		if err := run(context.Background(), bad, &out); err == nil {
 			t.Errorf("%v succeeded", bad)

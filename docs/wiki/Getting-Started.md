@@ -87,7 +87,7 @@ The worker also runs pirn's `ask` when it has your Anthropic API key. Restart it
 ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/loom worker -store ~/heedle-store.git
 ```
 
-Or keep the key in your keychain (the macOS Keychain, or the Linux secret service through `secret-tool`) once, and start the worker without it: the worker reads the environment first, then the keychain, when it starts. `secret set` asks for the value without showing it.
+Or keep the key in your keychain (the macOS Keychain, or the Linux secret service through `secret-tool`) once, and start the worker without it: the worker reads the environment first, then the keychain, for every request. `secret set` asks for the value without showing it.
 
 ```bash
 go run ./cmd/loom secret set ANTHROPIC_API_KEY
@@ -102,7 +102,7 @@ Then in terminal 3:
 go run ./cmd/loom run '(pipe (par (echo "The port is closed.") (echo "The ship sailed on time.")) (ask "Will the cargo be late? Cite the sources."))'
 ```
 
-The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. For `(agent "…")` steps, where Claude works in a fresh container, also give the worker `-agent-image <image ID>`, and `-agent-registry <repository>` to keep files too big for the record in an OCI registry. Give it `-connectors <file>` to offer agent steps MCP servers, which a step uses only as its arguments grant (`(agent "…" "linear/search_issues")`); see [pirn → Connectors](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors). A run whose steps queue writes runs each once after its steps; `loom writes -workflow <ID>` lists them and approves or declines the ones that wait ([Writes](How-It-Works#writes)). `(image "<Containerfile>")` builds an image ([bobbin → Image builds](https://github.com/heedle-ai/bobbin/wiki/How-It-Works#image-builds)); give the worker `-image-registry <repository>` for `(image … "push")`; see [pirn → Agent steps](https://github.com/heedle-ai/pirn/wiki/How-It-Works#agent-steps). On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
+The last output is Claude's answer as JSON: its text, the model (`claude-sonnet-5-5` unless the worker sets `-ask-model`) and token counts. For `(agent "…")` steps, where Claude works in a fresh container, also give the worker `-agent-image <image ID>`, and `-agent-registry <repository>` to keep files too big for the record in an OCI registry. Give it `-connectors <file>` to offer agent steps MCP servers (it reads the file again before every step, so editing it needs no restart, and a file that isn't there yet is no connectors), which a step uses only as its arguments grant (`(agent "…" "linear/search_issues")`); see [pirn → Connectors](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors). A run whose steps queue writes runs each once after its steps; `loom writes -workflow <ID>` lists them and approves or declines the ones that wait ([Writes](How-It-Works#writes)). `(image "<Containerfile>")` builds an image ([bobbin → Image builds](https://github.com/heedle-ai/bobbin/wiki/How-It-Works#image-builds)); give the worker `-image-registry <repository>` for `(image … "push")`; see [pirn → Agent steps](https://github.com/heedle-ai/pirn/wiki/How-It-Works#agent-steps). On Linux, give the worker `-browser-image` and the sources can be live pages; see [pirn](https://github.com/heedle-ai/pirn/wiki/Getting-Started).
 
 ## 5. Inspect runs with Git
 
