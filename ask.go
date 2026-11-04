@@ -16,6 +16,7 @@ import (
 
 	"github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/pirn"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle/plan"
 	"github.com/heedle-ai/treadle"
 	"github.com/heedle-ai/warp"
@@ -91,7 +92,8 @@ type Readiness struct {
 	Needs        []pirn.Need `json:"needs"`
 	Claude       string      `json:"claude,omitempty"`
 	ClaudeDetail string      `json:"claudeDetail,omitempty"`
-	Agent        string      `json:"agent,omitempty"` // why agent and skill steps can't run here
+	Agent        string      `json:"agent,omitempty"`   // why agent and skill steps can't run here
+	Browser      string      `json:"browser,omitempty"` // why browse steps can't run here
 	Error        string      `json:"error,omitempty"`
 	Ready        bool        `json:"ready"`
 }
@@ -103,6 +105,7 @@ type Worker struct {
 	Connectors pirn.Connectors
 	Keys       pirn.Vault
 	Agents     bool
+	Browsers   bool // has a browser image for browse steps
 }
 
 // CheckReady is whether p can run now on worker w with lib: each
@@ -125,7 +128,11 @@ func CheckReady(ctx context.Context, p plan.Plan, lib SkillGrants, w Worker) (Re
 	if req.Agent && !w.Agents {
 		r.Agent = "this worker has no agent image, so it can't run agent or skill steps: give heedle up -- -agent-image ID"
 	}
-	r.Ready = r.Claude == "" && r.Agent == ""
+	if req.Browser && !w.Browsers {
+		// Review 35: a browse step failed at once on a fresh install.
+		r.Browser = "this worker has no browser image, so it can't run browse steps: give heedle up -- -browser-image ID"
+	}
+	r.Ready = r.Claude == "" && r.Agent == "" && r.Browser == ""
 	for _, n := range r.Needs {
 		r.Ready = r.Ready && n.Problem == ""
 	}
@@ -414,6 +421,8 @@ type Requirements struct {
 	Grant  pirn.Grant
 	Claude bool
 	Agent  bool
+	// Browser: a browse step, which runs a browser in a container.
+	Browser bool
 }
 
 // Needs is what p's steps need. A skill version its step would refuse
@@ -454,6 +463,8 @@ func Needs(ctx context.Context, p plan.Plan, lib SkillGrants) (Requirements, err
 				}
 				add(h)
 			}
+		case reed.ActivityName:
+			r.Browser = true
 		case treadle.ActivityName:
 			r.Claude, r.Agent = true, true
 			if lib == nil || len(n.Args) < 2 {

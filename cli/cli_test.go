@@ -585,14 +585,14 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 	pl := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Skill", Args: []string{"trip", "v"}}}}
 	p := loom.Proposal{Summary: "I'll plan Lisbon.", Program: "(trip \"Lisbon\")\n", Plan: &pl,
 		Schedule: &loom.ScheduleSpec{Every: 168 * time.Hour}, Name: "lisbon-weekly",
-		Ready: &loom.Readiness{Claude: "key", Agent: "no agent image", Needs: []pirn.Need{{Connector: "maps", Problem: "absent"}, {Connector: "mail", Tools: []string{"send"}, Problem: "key", Key: "MAIL_KEY", Writes: []string{"send"}, Approve: true}, {Connector: "search"}, {Connector: "slack", Writes: []string{"post"}}}}}
+		Ready: &loom.Readiness{Claude: "key", Agent: "no agent image", Browser: "no browser image", Needs: []pirn.Need{{Connector: "maps", Problem: "absent"}, {Connector: "mail", Tools: []string{"send"}, Problem: "key", Key: "MAIL_KEY", Writes: []string{"send"}, Approve: true}, {Connector: "search"}, {Connector: "slack", Writes: []string{"post"}}}}}
 	var out bytes.Buffer
 	printProposal(&out, p)
 	for _, want := range []string{"I'll plan Lisbon.", "(trip \"Lisbon\")", "schedule lisbon-weekly: every 168h",
 		"missing  Claude: no ANTHROPIC_API_KEY; set it with: heedle secret set ANTHROPIC_API_KEY",
 		"missing  maps: no connector of that name; add one on the Connectors page, named maps",
 		"missing  mail (send), which can change things: send (each waits for your approval): its key MAIL_KEY isn't set; set it with: heedle secret set MAIL_KEY", "ready    search",
-		"missing  agent steps: no agent image", "ready    slack, which can change things: post (without asking you)"} {
+		"missing  agent steps: no agent image", "missing  browse steps: no browser image", "ready    slack, which can change things: post (without asking you)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
 		}
