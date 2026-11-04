@@ -57,6 +57,7 @@ const usage = `usage:
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
+  loom ask     [-address HOST:PORT] [-queue NAME] [-ref REF] [-then run|schedule] "WHAT YOU WANT DONE"
   loom secret  (set NAME | delete NAME | delete --all)
   loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
@@ -109,6 +110,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	resumeFlag := fs.String("resume", "", "schedules: the schedule to resume")
 	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
 	runNow := fs.String("run", "", "schedules: the schedule to run once now")
+	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -180,9 +182,19 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		loom.RegisterSkills(w, loom.Skills{Library: lib, Create: creator(agent)})
 		// The program writer, for drawdown: Claude with this worker's key,
 		// and its commands and newest skills.
-		loom.RegisterWriter(w, loom.Writer{Asker: claude, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
+		// and the front door (ask), which also says whether a proposal can
+		// run now, from this worker's skills, connectors and keys.
+		writer := loom.Writer{Asker: claude, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
 			return commandsFor(ctx, *store, registry())
-		}})
+		}, Ready: func(ctx context.Context, p plan.Plan) (loom.Readiness, error) {
+			cs, err := loadConnectors()
+			if err != nil {
+				return loom.Readiness{}, err
+			}
+			return loom.CheckReady(ctx, p, lib, cs, vault)
+		}}
+		loom.RegisterWriter(w, writer)
+		loom.RegisterAsk(w, writer)
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
 		return w.Run(worker.InterruptCh())
 
@@ -343,6 +355,22 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintln(out)
 		}
 		return nil
+
+	case "ask":
+		if fs.NArg() != 1 || *then != "" && *then != "run" && *then != "schedule" {
+			return errors.New("ask takes one request, in quotes, and -then run or -then schedule\n" + usage)
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is heedle up running?)", *address, err)
+		}
+		defer c.Close()
+		p, err := loom.Ask(ctx, c, *queue, loom.AskRequest{Request: fs.Arg(0), Today: time.Now().Format("2006-01-02"), TimeZone: localZone()})
+		if err != nil {
+			return err
+		}
+		printProposal(out, p)
+		return askThen(ctx, out, c, *queue, *ref, *then, p)
 
 	case "write":
 		if fs.NArg() != 1 {
@@ -988,4 +1016,116 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 		}
 		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d recent runs  %s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog)
 	}
+}
+
+// printProposal shows a proposal: what heedle would do, the program, when
+// it would run, and whether it can run now and, if not, what to set up.
+func printProposal(out io.Writer, p loom.Proposal) {
+	fmt.Fprintln(out, p.Summary)
+	if p.Skill != "" {
+		fmt.Fprintf(out, "\nNo command or skill here can do that. A skill that could:\n  %s\nCreate it with: heedle skills -store DIR -create %q -agent-image ID (it waits for your review)\n", p.Skill, p.Skill)
+		return
+	}
+	fmt.Fprintf(out, "\n%s", p.Program)
+	if p.Schedule != nil {
+		fmt.Fprintf(out, "\nschedule %s: %s\n", p.Name, describeSpec(*p.Schedule))
+	}
+	if r := p.Ready; r != nil {
+		fmt.Fprintln(out)
+		for _, line := range readinessLines(*r) {
+			fmt.Fprintln(out, line)
+		}
+	}
+}
+
+// readinessLines says, a line each, what a proposal needs and whether
+// it's there.
+func readinessLines(r loom.Readiness) []string {
+	if r.Error != "" {
+		return []string{"can't tell if it can run: " + r.Error}
+	}
+	var out []string
+	switch r.Claude {
+	case "key":
+		out = append(out, "missing  Claude: no ANTHROPIC_API_KEY; set it with: heedle secret set ANTHROPIC_API_KEY")
+	case "unreadable":
+		out = append(out, "missing  Claude: can't read ANTHROPIC_API_KEY now: "+r.ClaudeDetail)
+	}
+	for _, n := range r.Needs {
+		name := n.Connector
+		if len(n.Tools) > 0 {
+			name += " (" + strings.Join(n.Tools, ", ") + ")"
+		}
+		switch n.Problem {
+		case "":
+			out = append(out, "ready    "+name)
+		case "absent":
+			out = append(out, "missing  "+name+": no connector of that name; add one on the Connectors page, named "+n.Connector)
+		case "tools":
+			out = append(out, "missing  "+name+": the connector doesn't allow those tools; add them to its tools in the connectors file")
+		case "key":
+			out = append(out, "missing  "+name+": its key "+n.Key+" isn't set; set it with: heedle secret set "+n.Key)
+		default:
+			out = append(out, "missing  "+name+": can't read its key "+n.Key+" now: "+n.Detail)
+		}
+	}
+	if r.Ready {
+		out = append(out, "It can run now.")
+	}
+	return out
+}
+
+// askThen does what -then says with a proposal: run it, or schedule it as
+// proposed; each only if the worker can run it now.
+func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, then string, p loom.Proposal) error {
+	if then == "" {
+		if p.Plan != nil {
+			fmt.Fprintln(out, "\nRun it with -then run"+map[bool]string{true: ", or schedule it with -then schedule", false: ""}[p.Schedule != nil]+".")
+		}
+		return nil
+	}
+	switch {
+	case p.Plan == nil:
+		return errors.New("there's no program to " + then)
+	case p.Ready != nil && !p.Ready.Ready:
+		return errors.New("it can't run yet: set up what's missing above, then ask again")
+	case then == "schedule" && p.Schedule == nil:
+		return errors.New("the request doesn't say when to run it: ask again saying how often, or use -then run")
+	}
+	in := loom.RunInput{Program: p.Program, Plan: *p.Plan, Ref: ref}
+	if then == "schedule" {
+		if err := loom.CreateSchedule(ctx, c, queue, p.Name, in, *p.Schedule); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "scheduled %s: %s\n", p.Name, describeSpec(*p.Schedule))
+		return nil
+	}
+	wr, err := loom.Submit(ctx, c, queue, in)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "workflow %s run %s\n", wr.GetID(), wr.GetRunID())
+	var res loom.RunResult
+	if err := wr.Get(ctx, &res); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "commit   %s on %s\n", res.Commit, ref)
+	printWrites(out, res.Writes)
+	return nil
+}
+
+// localZone is this machine's IANA time zone: TZ if it names one, else
+// what /etc/localtime links to (macOS and Linux both link it into a
+// zoneinfo directory); "" if neither says.
+func localZone() string {
+	ok := func(z string) bool { _, err := time.LoadLocation(z); return z != "" && z != "Local" && err == nil }
+	if z := strings.TrimPrefix(os.Getenv("TZ"), ":"); ok(z) {
+		return z
+	}
+	if target, err := os.Readlink("/etc/localtime"); err == nil {
+		if _, z, found := strings.Cut(target, "zoneinfo/"); found && ok(z) {
+			return z
+		}
+	}
+	return ""
 }

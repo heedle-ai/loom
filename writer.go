@@ -100,6 +100,9 @@ type Written struct {
 type Writer struct {
 	Asker    pirn.Asker
 	Commands func(ctx context.Context) (*registry.Registry, []Command, error)
+	// Ready, if set, tells Ask whether a proposal's plan can run now on
+	// this worker (CheckReady with its library, connectors and keys).
+	Ready func(ctx context.Context, p plan.Plan) (Readiness, error)
 }
 
 // ErrNoProgram is a description Claude couldn't write a compiling program
@@ -128,11 +131,7 @@ func (w Writer) Write(ctx context.Context, description string) (Written, error) 
 	if err != nil {
 		return Written{}, err
 	}
-	var listing strings.Builder
-	for _, c := range cmds {
-		fmt.Fprintf(&listing, "%s\n  %s\n", c.Args, c.About)
-	}
-	sources := []pirn.Source{{ID: "language", Text: Language}, {ID: "commands", Text: listing.String()}}
+	sources := []pirn.Source{{ID: "language", Text: Language}, {ID: "commands", Text: listing(cmds)}}
 	instruction := "Write one draft program that does this task, using only the listed commands:\n\n" + description +
 		"\n\nReply with only the program, in a ``` block."
 	var last string

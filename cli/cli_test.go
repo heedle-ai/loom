@@ -574,3 +574,50 @@ func TestInv_SecretSetSaysNoRestart(t *testing.T) {
 		}
 	}
 }
+
+// TestInv_AskSaysWhatsMissing: heedle ask shows the summary, the program,
+// any schedule and, a line each, every need ready or missing with how to
+// set it up; with -then it runs or schedules only a program the worker
+// can run now, scheduling only what the request said when to run, and
+// never a skill idea. (Roadmap 8.4.)
+func TestInv_AskSaysWhatsMissing(t *testing.T) {
+	ctx := context.Background()
+	pl := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Skill", Args: []string{"trip", "v"}}}}
+	p := loom.Proposal{Summary: "I'll plan Lisbon.", Program: "(trip \"Lisbon\")\n", Plan: &pl,
+		Schedule: &loom.ScheduleSpec{Every: 168 * time.Hour}, Name: "lisbon-weekly",
+		Ready: &loom.Readiness{Claude: "key", Needs: []pirn.Need{{Connector: "maps", Problem: "absent"}, {Connector: "mail", Tools: []string{"send"}, Problem: "key", Key: "MAIL_KEY"}, {Connector: "search"}}}}
+	var out bytes.Buffer
+	printProposal(&out, p)
+	for _, want := range []string{"I'll plan Lisbon.", "(trip \"Lisbon\")", "schedule lisbon-weekly: every 168h",
+		"missing  Claude: no ANTHROPIC_API_KEY; set it with: heedle secret set ANTHROPIC_API_KEY",
+		"missing  maps: no connector of that name; add one on the Connectors page, named maps",
+		"missing  mail (send): its key MAIL_KEY isn't set; set it with: heedle secret set MAIL_KEY", "ready    search"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "It can run now.") {
+		t.Error("called ready")
+	}
+	for name, c := range map[string]struct {
+		p    loom.Proposal
+		then string
+	}{
+		"not ready":    {p, "run"},
+		"no program":   {loom.Proposal{Summary: "s", Skill: "a skill"}, "run"},
+		"no schedule":  {loom.Proposal{Summary: "s", Program: "(echo)", Plan: &pl, Ready: &loom.Readiness{Ready: true}}, "schedule"},
+		"skill to run": {loom.Proposal{Summary: "s", Skill: "a skill"}, "schedule"},
+	} {
+		if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, c.then, c.p); err == nil {
+			t.Errorf("%s: -then %s went ahead", name, c.then)
+		}
+	}
+	out.Reset()
+	printProposal(&out, loom.Proposal{Summary: "Nothing books flights.", Skill: "Books flights."})
+	if !strings.Contains(out.String(), "-create \"Books flights.\"") {
+		t.Errorf("skill idea: %s", out.String())
+	}
+	if err := run(ctx, []string{"ask", "-then", "go", "x"}, io.Discard); err == nil {
+		t.Error("-then go")
+	}
+}
