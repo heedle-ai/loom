@@ -11,6 +11,7 @@ import (
 
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/pirn"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle/plan"
 	"github.com/heedle-ai/treadle"
 )
@@ -146,12 +147,13 @@ func TestInv_NeedsAreWhatStepsAsk(t *testing.T) {
 		node("n1", treadle.ActivityName, "trip", string(sk.Version), "Lisbon"),
 		node("n2", pirn.AgentActivityName, "tidy it", "maps/search_places", "mail/send"),
 		node("n3", pirn.AgentActivityName, "more", "mail/read"),
+		node("n4", reed.ActivityName, "example.org"),
 	}}
 	r, err := loom.Needs(ctx, p, lib)
-	if err != nil || !r.Claude || !r.Agent || r.Grant.String() != "mail/read mail/send maps/directions maps/search_places search" {
+	if err != nil || !r.Claude || !r.Agent || !r.Browser || r.Grant.String() != "mail/read mail/send maps/directions maps/search_places search" {
 		t.Errorf("needs %q %+v %v", r.Grant, r, err)
 	}
-	if r, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", "Echo")}}, lib); err != nil || r.Claude || r.Agent || len(r.Grant) != 0 {
+	if r, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", "Echo")}}, lib); err != nil || r.Claude || r.Agent || r.Browser || len(r.Grant) != 0 {
 		t.Errorf("echo only: %+v %v", r, err)
 	}
 	if r, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", pirn.ActivityName, "q")}}, nil); err != nil || !r.Claude || r.Agent {
@@ -193,6 +195,14 @@ func TestInv_ProposalsSayIfTheyCanRun(t *testing.T) {
 	if r, err := loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: keys, Agents: true}); err != nil || !r.Ready || r.Claude != "" || r.Agent != "" ||
 		strings.Join(r.Needs[0].Writes, ",") != "save_list" || !r.Needs[0].Approve {
 		t.Errorf("all there: %+v %v", r, err)
+	}
+	// Review 35: a browse step needs a browser image.
+	browse := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: reed.ActivityName, Args: []string{"example.org"}}}}
+	if r, err := loom.CheckReady(ctx, browse, lib, loom.Worker{Connectors: cs, Keys: keys, Agents: true}); err != nil || r.Ready || r.Browser == "" {
+		t.Errorf("browse with no browser image: %+v %v", r, err)
+	}
+	if r, err := loom.CheckReady(ctx, browse, lib, loom.Worker{Connectors: cs, Keys: keys, Browsers: true}); err != nil || !r.Ready {
+		t.Errorf("browse with a browser image: %+v %v", r, err)
 	}
 	refused := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: treadle.ActivityName, Args: []string{"trip", strings.Repeat("0", 40)}}}}
 	if r, err := loom.CheckReady(ctx, refused, lib, loom.Worker{Connectors: cs, Keys: keys, Agents: true}); err != nil || r.Ready || r.Error == "" {

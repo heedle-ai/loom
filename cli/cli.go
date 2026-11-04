@@ -191,7 +191,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			if err != nil {
 				return loom.Readiness{}, err
 			}
-			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != ""})
+			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != "", Browsers: *browserImage != ""})
 		}}
 		loom.RegisterWriter(w, writer)
 		loom.RegisterAsk(w, writer)
@@ -1047,6 +1047,9 @@ func readinessLines(r loom.Readiness) []string {
 	var out []string
 	if r.Agent != "" {
 		out = append(out, "missing  agent steps: "+r.Agent)
+	}
+	if r.Browser != "" {
+		out = append(out, "missing  browse steps: "+r.Browser)
 	}
 	switch r.Claude {
 	case "key":

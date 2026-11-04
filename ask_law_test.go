@@ -12,13 +12,14 @@ import (
 	"github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/pirn"
+	"github.com/heedle-ai/reed"
 )
 
 // lawRegistry has echo, ask and agent: every kind of step whose needs
 // differ, with no skill library.
 func lawRegistry(t *testing.T) *registry.Registry {
 	reg := draft.DefaultRegistry()
-	for _, s := range []registry.BuiltinSpec{pirn.BuiltinSpec(), pirn.AgentBuiltinSpec()} {
+	for _, s := range []registry.BuiltinSpec{pirn.BuiltinSpec(), pirn.AgentBuiltinSpec(), reed.BuiltinSpec()} {
 		if err := reg.Register(s); err != nil {
 			t.Fatal(err)
 		}
@@ -32,9 +33,11 @@ func lawRegistry(t *testing.T) *registry.Registry {
 func randomProgram(r *rand.Rand, depth int) string {
 	grants := []string{`"maps"`, `"maps/directions"`, `"maps/search_places"`, `"search"`, `"mail/send"`, `"mail/read"`}
 	if depth == 0 || r.Intn(3) == 0 {
-		switch r.Intn(3) {
+		switch r.Intn(4) {
 		case 0:
 			return fmt.Sprintf(`(echo "e%d")`, r.Intn(9))
+		case 3:
+			return fmt.Sprintf(`(browse "site%d.example.org")`, r.Intn(9))
 		case 1:
 			return fmt.Sprintf(`(ask "q%d")`, r.Intn(9))
 		default:
@@ -76,11 +79,11 @@ func needsUnion(a, b loom.Requirements) loom.Requirements {
 			}
 		}
 	}
-	return loom.Requirements{Grant: g, Claude: a.Claude || b.Claude, Agent: a.Agent || b.Agent}
+	return loom.Requirements{Grant: g, Claude: a.Claude || b.Claude, Agent: a.Agent || b.Agent, Browser: a.Browser || b.Browser}
 }
 
 func needsString(r loom.Requirements) string {
-	return fmt.Sprintf("%s claude=%v agent=%v", r.Grant, r.Claude, r.Agent)
+	return fmt.Sprintf("%s claude=%v agent=%v browser=%v", r.Grant, r.Claude, r.Agent, r.Browser)
 }
 
 // TestLaw_NeedsIsAHomomorphism: what a program needs is a homomorphism
@@ -106,7 +109,7 @@ func TestLaw_NeedsIsAHomomorphism(t *testing.T) {
 		return n
 	}
 	unit := needs(`(echo "unit")`)
-	if len(unit.Grant) != 0 || unit.Claude || unit.Agent {
+	if len(unit.Grant) != 0 || unit.Claude || unit.Agent || unit.Browser {
 		t.Fatalf("echo needs %s", needsString(unit))
 	}
 	for i := 0; i < 300; i++ {
@@ -151,7 +154,7 @@ func TestLaw_ReadyIsAMeet(t *testing.T) {
 		{Name: "mail", URL: "https://mail.example/mcp", Writes: []string{"send"}, Approve: true},
 	}
 	workers := []loom.Worker{
-		{Connectors: all, Keys: memVault{"ANTHROPIC_API_KEY": "k", "LAW_SEARCH_KEY": "s"}, Agents: true},
+		{Connectors: all, Keys: memVault{"ANTHROPIC_API_KEY": "k", "LAW_SEARCH_KEY": "s"}, Agents: true, Browsers: true},
 		{Connectors: all[:2], Keys: memVault{"ANTHROPIC_API_KEY": "k"}, Agents: true}, // no mail, no search key
 		{Connectors: all, Keys: memVault{"LAW_SEARCH_KEY": "s"}, Agents: false},       // no Claude, no agent image
 	}
