@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
@@ -29,9 +30,14 @@ type Notice struct {
 
 var taskQueueName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
 
-// MaxNotices bounds the notices one Check returns; the rest wait for the
-// next.
-const MaxNotices = 20
+// MaxRunsAsked bounds how many runs going now a Check asks for their
+// writes (each a query to its worker), and AskWithin how long each may
+// take; MaxPages how many pages of 100 runs it reads.
+const (
+	MaxRunsAsked = 25
+	AskWithin    = 3 * time.Second
+	MaxPages     = 10
+)
 
 // Watcher finds new notices on a task queue: scheduled runs that ended
 // after Since, and writes waiting for approval in runs going now.
@@ -39,37 +45,31 @@ type Watcher struct {
 	Client client.Client
 	Queue  string
 	Since  time.Time // runs that ended before this aren't news
-	told   map[string]bool
+	// told is what's been told: a run by when it ended, a write by when
+	// it was last seen waiting. Runs that ended well before Since, and
+	// writes no longer waiting, are forgotten, so it stays small.
+	told map[string]time.Time
 }
 
-// Check returns what there is to tell that it hasn't told before.
+// Check returns everything there is to tell that it hasn't told before,
+// reading every page; it tells each thing once.
 func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 	if !taskQueueName.MatchString(w.Queue) {
 		return nil, fmt.Errorf("loom: task queue %q: use letters, digits, '.', '_' and '-'", w.Queue)
 	}
 	if w.told == nil {
-		w.told = map[string]bool{}
+		w.told = map[string]time.Time{}
 	}
+	now := time.Now()
 	var out []Notice
-	add := func(n Notice) {
-		if !w.told[n.Key] && len(out) < MaxNotices {
-			w.told[n.Key] = true
-			out = append(out, n)
-		}
-	}
-	// Runs a schedule started that ended since: a minute back, since
-	// Temporal's list catches up in a moment; told keeps each once.
-	since := w.Since
-	ended, err := w.Client.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Query: fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus != 'Running' AND CloseTime > '%s'",
-			RunWorkflowName, w.Queue, since.UTC().Format(time.RFC3339)),
-		PageSize: 100,
-	})
+	// Runs a schedule started that ended since; told keeps each once.
+	ended, err := w.list(ctx, fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus != 'Running' AND CloseTime > '%s'",
+		RunWorkflowName, w.Queue, w.Since.UTC().Format(time.RFC3339)))
 	if err != nil {
 		return nil, err
 	}
 	dc := converter.GetDefaultDataConverter()
-	for _, e := range ended.Executions {
+	for _, e := range ended {
 		var by string
 		if p := e.GetSearchAttributes().GetIndexedFields()["TemporalScheduledById"]; p != nil {
 			dc.FromPayload(p, &by)
@@ -78,35 +78,86 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 			continue // not a schedule's: you started it, you know
 		}
 		name, wf, run := strings.TrimPrefix(by, SchedulePrefix), e.GetExecution().GetWorkflowId(), e.GetExecution().GetRunId()
-		n := Notice{Key: "run:" + wf + "/" + run, Workflow: wf, Run: run, Title: "heedle: " + name + " finished", Body: "Its run is recorded."}
-		if s := e.GetStatus(); s != enums.WORKFLOW_EXECUTION_STATUS_COMPLETED {
-			n.Title = "heedle: " + name + " didn't finish"
-			n.Body = "Its run ended " + strings.ToLower(strings.TrimPrefix(s.String(), "WORKFLOW_EXECUTION_STATUS_")) + ", and its schedule is paused until you look."
+		key := "run:" + wf + "/" + run
+		if _, ok := w.told[key]; ok {
+			continue
 		}
-		add(n)
+		closed := now
+		if t := e.GetCloseTime(); t != nil {
+			closed = t.AsTime()
+		}
+		w.told[key] = closed
+		n := Notice{Key: key, Workflow: wf, Run: run, Title: "heedle: " + name + " finished", Body: "Its run is recorded."}
+		switch s := e.GetStatus(); s {
+		case enums.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+		case enums.WORKFLOW_EXECUTION_STATUS_FAILED, enums.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
+			// A schedule pauses when a run fails (PauseOnFailure).
+			n.Title, n.Body = "heedle: "+name+" didn't finish", "Its run "+map[bool]string{true: "failed", false: "timed out"}[s == enums.WORKFLOW_EXECUTION_STATUS_FAILED]+", and its schedule is paused until you look."
+		default:
+			n.Title, n.Body = "heedle: "+name+" didn't finish", "Its run was "+strings.ToLower(strings.TrimPrefix(s.String(), "WORKFLOW_EXECUTION_STATUS_"))+"."
+		}
+		out = append(out, n)
 	}
-	if t := time.Now().Add(-time.Minute); t.After(w.Since) {
+	// Looking a minute back next time, since Temporal's list catches up
+	// in a moment; runs that ended before that are forgotten.
+	if t := now.Add(-time.Minute); t.After(w.Since) {
 		w.Since = t
 	}
+	for k, at := range w.told {
+		if strings.HasPrefix(k, "run:") && at.Before(w.Since.Add(-time.Minute)) {
+			delete(w.told, k)
+		}
+	}
 	// Writes waiting in runs going now.
-	running, err := w.Client.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Query:    fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus = 'Running'", RunWorkflowName, w.Queue),
-		PageSize: 100,
-	})
+	running, err := w.list(ctx, fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus = 'Running'", RunWorkflowName, w.Queue))
 	if err != nil {
 		return out, err
 	}
-	for _, e := range running.Executions {
+	waiting := map[string]bool{}
+	for i, e := range running {
+		if i == MaxRunsAsked {
+			break
+		}
 		wf, run := e.GetExecution().GetWorkflowId(), e.GetExecution().GetRunId()
-		writes, err := Writes(ctx, w.Client, wf)
+		qctx, cancel := context.WithTimeout(ctx, AskWithin)
+		writes, err := Writes(qctx, w.Client, wf)
+		cancel()
 		if err != nil {
 			continue // a run that just ended, or a worker that's busy: next time
 		}
 		for _, o := range writes {
-			if o.Status == WriteWaiting {
-				add(Notice{Key: "write:" + wf + "/" + o.Node + "/" + o.ID, Workflow: wf, Run: run,
+			if o.Status != WriteWaiting {
+				continue
+			}
+			key := "write:" + wf + "/" + o.Node + "/" + o.ID
+			waiting[key] = true
+			if _, ok := w.told[key]; !ok {
+				out = append(out, Notice{Key: key, Workflow: wf, Run: run,
 					Title: "heedle: a write waits for you", Body: fmt.Sprintf("%s/%s, from step %s. Approve or decline it.", o.Connector, o.Tool, o.Node)})
 			}
+			w.told[key] = now
+		}
+	}
+	for k := range w.told {
+		if strings.HasPrefix(k, "write:") && !waiting[k] {
+			delete(w.told, k)
+		}
+	}
+	return out, nil
+}
+
+// list reads every page (up to MaxPages) of runs matching query.
+func (w *Watcher) list(ctx context.Context, query string) ([]*workflow.WorkflowExecutionInfo, error) {
+	var out []*workflow.WorkflowExecutionInfo
+	var token []byte
+	for page := 0; page < MaxPages; page++ {
+		res, err := w.Client.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{Query: query, PageSize: 100, NextPageToken: token})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Executions...)
+		if token = res.NextPageToken; len(token) == 0 {
+			break
 		}
 	}
 	return out, nil
