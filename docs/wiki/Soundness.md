@@ -38,6 +38,16 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | 13 | **Merge is commutative, associative and idempotent** on beliefs: A + B = B + A (ours on one side is theirs on the other), (A + B) + C = A + (B + C) without conflicts, and merging what's already merged changes nothing | loom `TestLaw_MergeIsCommutative`, `TestLaw_MergeIsAssociative`, `TestLaw_MergeIsIdempotent` |
 | 14 | **Every commit's files are a real run,** merges included: a merge commit's `program.draft`, `plan.json` and `outputs/` are its first parent's run | loom `TestLaw_MergeRecordsStaySelfVerifying` |
 | 15 | **Writes run at most once per run:** a write an agent step queued, and was granted, runs once after the run's steps (once approved, if it must be), with one attempt, never retried, however often its step was retried; a write it wasn't granted, or one in an output that isn't an agent step's, never runs; the record keeps every write and what came of it | loom `TestLaw_WritesRunAtMostOnce`, `TestInv_WritesWaitForApproval`; pirn `TestLaw_GrantsOnlyNarrow` (a step gets only what both it and the worker grant) |
+| 16 | **What a program needs is a homomorphism:** needs(f ; g) = needs(f) ∪ needs(g) = needs(f ⊗ g), and a step that needs nothing is the unit. Needs (connectors with their tools, Claude, an agent image) form a join-semilattice under ∪, so a program's needs depend only on its steps, never on bracketing or order | loom `TestLaw_NeedsIsAHomomorphism` (300 random programs) |
+| 17 | **Ready is a meet:** for a fixed worker, ready(f ; g) = ready(f) ∧ ready(g) = ready(f ⊗ g). The front door's verdict on a whole proposal is the conjunction of its steps', and adding a step never makes a plan readier | loom `TestLaw_ReadyIsAMeet` (300 random programs, three workers) |
+| 18 | **Ask adds nothing to compilation:** a proposal's plan is exactly what its program compiles to, so the graph the card draws, and what Run submits and the worker recompiles (law 11), are one plan | loom `TestLaw_ProposalsCompileAsRunsDo` |
+| 19 | **A schedule's run is a run:** each run a schedule starts is `RunWorkflow` with the same input `Submit` would give it, so laws 3 to 15 hold for scheduled runs too | loom `TestInv_SchedulesStartRunsLikeSubmit` |
+
+## The front door
+
+[[/images/front-door.svg|alt=String diagram of the front door: propose = ask ; check ; compile ; Δ ; (id ⊗ (needs ; ready)); nothing runs]]
+
+Asking heedle is outside the run: it proposes, and Run is the ordinary run of the proposed program (laws 18, 11). Claude's part is the only arrow that isn't a function of its input; everything after it is checked and computed by loom, and what the proposal needs is computed from the plan, never taken from Claude (laws 16, 17).
 
 ## Where the guarantees stop
 
@@ -47,3 +57,5 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 - **`par` is a product of plans, not of arrows in one process.** Each branch is a separate Temporal activity; the laws above are checked for the shapes in the tests, not proved for every program.
 - **Merges are of whole runs.** A merge never combines two runs into one; a question both sides answered differently is a conflict you resolve. After a criss-cross merge, questions the common ancestors disagree on conflict unless both sides agree. See [Branching and Merging](Branching-and-Merging).
 - **Identity uses SHA-1,** Git's default. That's sound for content heedle-ai writes, but not a defence against deliberately crafted collisions.
+- **Laws 16 and 17 are about one moment.** Ready says what a step starting now would get; a key deleted or a sign-in that expires between the check and the run still fails the run, which then says what's missing (drawdown's **What went wrong**).
+- **A proposal's summary is Claude's words.** It isn't checked against the program. The card therefore shows the program, its graph and what each connector could change (writes, and whether they wait for approval), and nothing runs until you press Run.
