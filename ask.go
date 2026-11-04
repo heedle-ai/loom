@@ -97,7 +97,7 @@ type Readiness struct {
 
 // CheckReady is whether p can run now on a worker with lib, cs and keys
 // from the environment, then v: as its steps would decide when they start.
-func CheckReady(ctx context.Context, p plan.Plan, lib *treadle.Library, cs pirn.Connectors, v pirn.Vault) (Readiness, error) {
+func CheckReady(ctx context.Context, p plan.Plan, lib SkillFiles, cs pirn.Connectors, v pirn.Vault) (Readiness, error) {
 	g, claude, err := Needs(ctx, p, lib)
 	if err != nil {
 		return Readiness{}, err
@@ -341,10 +341,16 @@ func Ask(ctx context.Context, c client.Client, taskQueue string, in AskRequest) 
 	return out, err
 }
 
+// SkillFiles is where a skill's files are found by version: a
+// *treadle.Library.
+type SkillFiles interface {
+	Files(ctx context.Context, version warp.ID) (map[string][]byte, error)
+}
+
 // Needs is what p's steps need: the connectors they ask for, all
 // together (each skill's metadata.connectors, at the version p pins, and
 // each agent step's grants), and whether any asks Claude.
-func Needs(ctx context.Context, p plan.Plan, lib *treadle.Library) (pirn.Grant, bool, error) {
+func Needs(ctx context.Context, p plan.Plan, lib SkillFiles) (pirn.Grant, bool, error) {
 	g := pirn.Grant{}
 	claude := false
 	add := func(h pirn.Grant) {

@@ -132,6 +132,10 @@ It prints the program, then a line saying how many steps it has and on which att
 
 **A proposal says whether it can run now.** `Needs` reads, from the compiled plan and not from Claude, what its steps ask for: each skill's `metadata.connectors` at the version the plan pins, each agent step's grants, and Claude for any ask, agent or skill step (`TestInv_NeedsAreWhatStepsAsk`). `CheckReady` checks those against the worker's connectors and keys with [pirn's `Ready`](https://github.com/heedle-ai/pirn/wiki/How-It-Works#connectors), which decides as a starting step would; the worker puts the result in the proposal (`Proposal.Ready`): each connector ready or why not (no connector of that name, tools it doesn't allow, a key not set, a keychain that can't be read), and the Anthropic key (`TestInv_ProposalsSayIfTheyCanRun`). `loom ask` prints it a line each, with how to set up what's missing; `-then run` runs the proposal and `-then schedule` schedules it as proposed, each only if it can run now, and a schedule only if the request said when (`TestInv_AskSaysWhatsMissing`). The run or schedule is an ordinary one, recorded like any other; the worker checks the plan against the skill versions it pins, as for every run.
 
+## Notices
+
+A person who isn't watching should still hear when something needs them. `Watcher.Check` finds, on a task queue, each run a loom schedule started (Temporal's `TemporalScheduledById` names `loom-schedule-…`) that ended since it began watching, finished or not (a run that fails pauses its schedule, and the notice says so), and each write waiting for approval in a run going now (`WritesQuery`). It tells each thing once, however often it looks, at most 20 at a time (`MaxNotices`); a run you started yourself isn't news (`TestInv_NoticesAreToldOnce`). `heedle up` shows them as the system's notifications.
+
 ## Naming
 
 | Thing | ID | Why |
