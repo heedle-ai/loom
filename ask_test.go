@@ -123,13 +123,18 @@ func TestInv_AskingIsAWorkflowThatRunsNothing(t *testing.T) {
 	}
 }
 
-// TestInv_NeedsAreWhatStepsAsk: a plan needs the connectors its skills
-// declare (at the versions it pins) and its agent steps grant, together,
-// and Claude when any step asks it; a skill version the library doesn't
-// have is an error, never no needs. (Roadmap 8.2.)
+// TestInv_NeedsAreWhatStepsAsk: a plan needs the connectors its skills'
+// steps would be granted (at the versions it pins) and its agent steps
+// grant, together, Claude for any Claude step, and an agent image for
+// agent and skill steps; a skill version its step would refuse is an
+// error, never no needs. (Roadmap 8.2; review 33.)
 func TestInv_NeedsAreWhatStepsAsk(t *testing.T) {
 	lib := &treadle.Library{Store: newStore(t)}
 	sk, err := lib.Add(ctx, map[string][]byte{"SKILL.md": []byte("---\nname: trip\ndescription: Plans trips.\nmetadata:\n  connectors: \"search maps/directions\"\n---\nPlan it.\n")}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := lib.Add(ctx, map[string][]byte{"SKILL.md": []byte("---\nname: other\ndescription: Other.\n---\nGo.\n")}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,27 +145,35 @@ func TestInv_NeedsAreWhatStepsAsk(t *testing.T) {
 		node("n0", "Echo", "x"),
 		node("n1", treadle.ActivityName, "trip", string(sk.Version), "Lisbon"),
 		node("n2", pirn.AgentActivityName, "tidy it", "maps/search_places", "mail/send"),
+		node("n3", pirn.AgentActivityName, "more", "mail/read"),
 	}}
-	g, claude, err := loom.Needs(ctx, p, lib)
-	if err != nil || !claude || g.String() != "mail/send maps/directions maps/search_places search" {
-		t.Errorf("needs %q %v %v", g, claude, err)
+	r, err := loom.Needs(ctx, p, lib)
+	if err != nil || !r.Claude || !r.Agent || r.Grant.String() != "mail/read mail/send maps/directions maps/search_places search" {
+		t.Errorf("needs %q %+v %v", r.Grant, r, err)
 	}
-	if g, claude, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", "Echo")}}, lib); err != nil || claude || len(g) != 0 {
-		t.Errorf("echo only: %q %v %v", g, claude, err)
+	if r, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", "Echo")}}, lib); err != nil || r.Claude || r.Agent || len(r.Grant) != 0 {
+		t.Errorf("echo only: %+v %v", r, err)
 	}
-	if g, claude, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", pirn.ActivityName, "q")}}, nil); err != nil || !claude || len(g) != 0 {
-		t.Errorf("ask only: %q %v %v", g, claude, err)
+	if r, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{node("n0", pirn.ActivityName, "q")}}, nil); err != nil || !r.Claude || r.Agent {
+		t.Errorf("ask only: %+v %v", r, err)
 	}
-	missing := plan.Plan{Nodes: []plan.Node{node("n0", treadle.ActivityName, "trip", strings.Repeat("0", 40))}}
-	if _, _, err := loom.Needs(ctx, missing, lib); err == nil {
-		t.Error("a version the library doesn't have")
+	for name, bad := range map[string]plan.Node{
+		"a version it never had":  node("n0", treadle.ActivityName, "trip", strings.Repeat("0", 40)),
+		"another skill's version": node("n0", treadle.ActivityName, "trip", string(other.Version)),
+		"no version":              node("n0", treadle.ActivityName, "trip"),
+	} {
+		if _, err := loom.Needs(ctx, plan.Plan{Nodes: []plan.Node{bad}}, lib); !errors.Is(err, treadle.ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
 // TestInv_ProposalsSayIfTheyCanRun: a proposal with a program says
-// whether this worker can run it now, from its steps' needs (CheckReady):
-// each connector ready or why not, and the Anthropic key when a step asks
-// Claude; a check that fails says why, never "ready". (Roadmap 8.2.)
+// whether this worker can run it now (CheckReady): each connector ready
+// or why not, with the writes it would allow, the Anthropic key when a
+// step asks Claude, an agent image when a step runs in a container, and
+// a skill version its step would refuse; a check that fails says why,
+// never "ready". (Roadmap 8.2; review 33.)
 func TestInv_ProposalsSayIfTheyCanRun(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	lib := &treadle.Library{Store: newStore(t)}
@@ -171,14 +184,19 @@ func TestInv_ProposalsSayIfTheyCanRun(t *testing.T) {
 	p := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: treadle.ActivityName, Args: []string{"trip", string(sk.Version), "Lisbon"}}}}
 	cs := pirn.Connectors{{Name: "search", URL: "https://search.example/mcp", TokenEnv: "LOOM_TEST_SEARCH_KEY"}}
 	keys := memVault{"LOOM_TEST_SEARCH_KEY": "s"}
-	r, err := loom.CheckReady(ctx, p, lib, cs, keys)
-	if err != nil || r.Ready || r.Claude != "key" || len(r.Needs) != 2 || r.Needs[0].Connector != "maps" || r.Needs[0].Problem != "absent" || r.Needs[1].Problem != "" {
-		t.Errorf("no maps, no Claude key: %+v %v", r, err)
+	r, err := loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: keys})
+	if err != nil || r.Ready || r.Claude != "key" || r.Agent == "" || len(r.Needs) != 2 || r.Needs[0].Connector != "maps" || r.Needs[0].Problem != "absent" || r.Needs[1].Problem != "" {
+		t.Errorf("no maps, no Claude key, no agent image: %+v %v", r, err)
 	}
-	cs = append(cs, pirn.Connector{Name: "maps", URL: "https://maps.example/mcp"})
+	cs = append(cs, pirn.Connector{Name: "maps", URL: "https://maps.example/mcp", Writes: []string{"save_list"}, Approve: true})
 	keys["ANTHROPIC_API_KEY"] = "k"
-	if r, err := loom.CheckReady(ctx, p, lib, cs, keys); err != nil || !r.Ready || r.Claude != "" {
+	if r, err := loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: keys, Agents: true}); err != nil || !r.Ready || r.Claude != "" || r.Agent != "" ||
+		strings.Join(r.Needs[0].Writes, ",") != "save_list" || !r.Needs[0].Approve {
 		t.Errorf("all there: %+v %v", r, err)
+	}
+	refused := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: treadle.ActivityName, Args: []string{"trip", strings.Repeat("0", 40)}}}}
+	if r, err := loom.CheckReady(ctx, refused, lib, loom.Worker{Connectors: cs, Keys: keys, Agents: true}); err != nil || r.Ready || r.Error == "" {
+		t.Errorf("a version the step refuses: %+v %v", r, err)
 	}
 	w := writer(&scripted{replies: []string{reply(`"summary": "Hi.", "program": "(echo \"hi\")"`)}})
 	w.Ready = func(context.Context, plan.Plan) (loom.Readiness, error) {
@@ -190,6 +208,29 @@ func TestInv_ProposalsSayIfTheyCanRun(t *testing.T) {
 	w.Ready = func(context.Context, plan.Plan) (loom.Readiness, error) { return loom.Readiness{Ready: true}, nil }
 	if prop, _ := w.Ask(ctx, loom.AskRequest{Request: "hi"}); prop.Ready == nil || !prop.Ready.Ready {
 		t.Errorf("ready: %+v", prop.Ready)
+	}
+}
+
+// TestInv_AskTakesOneAnswerAsMeant: Claude's answer is one JSON object
+// with each field once and nothing after it; a program too long to send
+// back with the next turn goes back to Claude; a cron with no time zone
+// is in the person's. (Review 33.)
+func TestInv_AskTakesOneAnswerAsMeant(t *testing.T) {
+	good := reply(`"summary": "Hi.", "program": "(echo \"hi\")"`)
+	for name, bad := range map[string]string{
+		"a second object": "```json\n" + `{"summary": "Hi.", "program": "(echo \"hi\")"} {"summary": "x", "program": "(nope)"}` + "\n```",
+		"text after":      "```json\n" + `{"summary": "Hi.", "program": "(echo \"hi\")"} and more` + "\n```",
+		"a field twice":   reply(`"summary": "I'll say hi.", "program": "(echo \"hi\")", "summary": "I'll delete everything"`),
+		"a long program":  reply(`"summary": "s", "program": "(echo \"` + strings.Repeat("x", loom.MaxTurnProgram) + `\")"`),
+	} {
+		a := &scripted{replies: []string{bad, good}}
+		if p, err := writer(a).Ask(ctx, loom.AskRequest{Request: "say hi"}); err != nil || p.Attempts != 2 || p.Summary != "Hi." {
+			t.Errorf("%s: %+v %v", name, p.Summary, err)
+		}
+	}
+	a := &scripted{replies: []string{reply(`"summary": "s", "program": "(echo)", "cron": "0 8 * * 1", "name": "mondays"`)}}
+	if p, err := writer(a).Ask(ctx, loom.AskRequest{Request: "x", TimeZone: "America/Los_Angeles"}); err != nil || p.Schedule == nil || p.Schedule.TimeZone != "America/Los_Angeles" {
+		t.Errorf("cron with no zone: %+v %v", p.Schedule, err)
 	}
 }
 

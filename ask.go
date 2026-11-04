@@ -91,22 +91,41 @@ type Readiness struct {
 	Needs        []pirn.Need `json:"needs"`
 	Claude       string      `json:"claude,omitempty"`
 	ClaudeDetail string      `json:"claudeDetail,omitempty"`
+	Agent        string      `json:"agent,omitempty"` // why agent and skill steps can't run here
 	Error        string      `json:"error,omitempty"`
 	Ready        bool        `json:"ready"`
 }
 
-// CheckReady is whether p can run now on a worker with lib, cs and keys
-// from the environment, then v: as its steps would decide when they start.
-func CheckReady(ctx context.Context, p plan.Plan, lib SkillFiles, cs pirn.Connectors, v pirn.Vault) (Readiness, error) {
-	g, claude, err := Needs(ctx, p, lib)
+// Worker is what a worker runs steps with: its connectors, the vault
+// its steps read keys from (the environment first), and whether it has
+// an agent image for agent and skill steps.
+type Worker struct {
+	Connectors pirn.Connectors
+	Keys       pirn.Vault
+	Agents     bool
+}
+
+// CheckReady is whether p can run now on worker w with lib: each
+// connector and key as its steps would read them, each skill version as
+// its step would accept it, and an agent image if a step runs in a
+// container.
+func CheckReady(ctx context.Context, p plan.Plan, lib SkillGrants, w Worker) (Readiness, error) {
+	req, err := Needs(ctx, p, lib)
+	if errors.Is(err, treadle.ErrInvalid) || errors.Is(err, pirn.ErrInvalid) {
+		// A step that would be refused: the run can't start.
+		return Readiness{Needs: []pirn.Need{}, Error: err.Error()}, nil
+	}
 	if err != nil {
 		return Readiness{}, err
 	}
-	r := Readiness{Needs: cs.Ready(ctx, g, v)}
-	if claude {
-		r.Claude, r.ClaudeDetail = pirn.KeyReady(ctx, v, "ANTHROPIC_API_KEY")
+	r := Readiness{Needs: w.Connectors.Ready(ctx, req.Grant, w.Keys)}
+	if req.Claude {
+		r.Claude, r.ClaudeDetail = pirn.KeyReady(ctx, w.Keys, "ANTHROPIC_API_KEY")
 	}
-	r.Ready = r.Claude == ""
+	if req.Agent && !w.Agents {
+		r.Agent = "this worker has no agent image, so it can't run agent or skill steps: give heedle up -- -agent-image ID"
+	}
+	r.Ready = r.Claude == "" && r.Agent == ""
 	for _, n := range r.Needs {
 		r.Ready = r.Ready && n.Problem == ""
 	}
@@ -149,13 +168,46 @@ func parseAnswer(text string) (askAnswer, error) {
 	if err := dec.Decode(&a); err != nil {
 		return a, fmt.Errorf("it isn't the JSON object asked for: %v", err)
 	}
+	// One object, nothing after it, each field once (review 33: a second
+	// object, or a repeated "summary", was taken silently).
+	if dec.More() {
+		return a, errors.New("give only one JSON object, with nothing after it")
+	}
+	if k := repeatedKey(body); k != "" {
+		return a, fmt.Errorf("the field %q is given twice", k)
+	}
 	return a, nil
+}
+
+// repeatedKey is a key the JSON object body gives twice, or "".
+func repeatedKey(body string) string {
+	dec := json.NewDecoder(strings.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return ""
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		k, _ := t.(string)
+		if seen[k] {
+			return k
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return ""
+		}
+	}
+	return ""
 }
 
 // propose checks a against reg: a summary; exactly one of a program that
 // compiles and a skill to create; and a schedule only with a program,
 // given one way, sensibly, with a name.
-func propose(ctx context.Context, reg *registry.Registry, a askAnswer) (Proposal, error) {
+func propose(ctx context.Context, reg *registry.Registry, a askAnswer, zone string) (Proposal, error) {
 	p := Proposal{Summary: strings.TrimSpace(a.Summary), Program: strings.TrimSpace(a.Program), Skill: strings.TrimSpace(a.Skill)}
 	switch {
 	case p.Summary == "" || len(p.Summary) > MaxSummary:
@@ -164,6 +216,9 @@ func propose(ctx context.Context, reg *registry.Registry, a askAnswer) (Proposal
 		return Proposal{}, errors.New(`give exactly one of "program" and "skill"`)
 	case len(p.Skill) > MaxSkillIdea:
 		return Proposal{}, fmt.Errorf("the skill is at most %d bytes", MaxSkillIdea)
+	case len(p.Program) > MaxTurnProgram:
+		// It goes back with the next turn, which takes at most this (review 33).
+		return Proposal{}, fmt.Errorf("the program is at most %d bytes", MaxTurnProgram)
 	}
 	repeats := a.Every != "" || a.Cron != ""
 	if p.Skill != "" {
@@ -184,6 +239,9 @@ func propose(ctx context.Context, reg *registry.Registry, a askAnswer) (Proposal
 		return p, nil
 	}
 	spec := ScheduleSpec{Cron: a.Cron, TimeZone: a.TimeZone}
+	if spec.Cron != "" && spec.TimeZone == "" {
+		spec.TimeZone = zone // the person's, not the server's UTC (review 33)
+	}
 	if a.Every != "" {
 		if spec.Every, err = time.ParseDuration(a.Every); err != nil {
 			return Proposal{}, fmt.Errorf(`"every" %q isn't a duration such as "168h"`, a.Every)
@@ -267,7 +325,7 @@ func (w Writer) Ask(ctx context.Context, in AskRequest) (Proposal, error) {
 		ans, err := parseAnswer(a.Text)
 		if err == nil {
 			var p Proposal
-			if p, err = propose(ctx, reg, ans); err == nil {
+			if p, err = propose(ctx, reg, ans, zone); err == nil {
 				p.Attempts = attempt
 				if p.Plan != nil && w.Ready != nil {
 					r, err := w.Ready(ctx, *p.Plan)
@@ -341,61 +399,72 @@ func Ask(ctx context.Context, c client.Client, taskQueue string, in AskRequest) 
 	return out, err
 }
 
-// SkillFiles is where a skill's files are found by version: a
-// *treadle.Library.
-type SkillFiles interface {
-	Files(ctx context.Context, version warp.ID) (map[string][]byte, error)
+// SkillGrants gives what a skill's step at a version would be granted,
+// refusing what the step refuses: a *treadle.Library (StepGrant).
+type SkillGrants interface {
+	StepGrant(ctx context.Context, name string, version warp.ID) (pirn.Grant, error)
 }
 
-// Needs is what p's steps need: the connectors they ask for, all
-// together (each skill's metadata.connectors, at the version p pins, and
-// each agent step's grants), and whether any asks Claude.
-func Needs(ctx context.Context, p plan.Plan, lib SkillFiles) (pirn.Grant, bool, error) {
-	g := pirn.Grant{}
-	claude := false
+// Requirements are what a plan's steps need to run: the connectors they
+// ask for, all together (each skill's, as its step would be granted at
+// the version the plan pins, and each agent step's grants), Claude for
+// any ask, agent or skill step, and an agent image for agent and skill
+// steps, which run in a container.
+type Requirements struct {
+	Grant  pirn.Grant
+	Claude bool
+	Agent  bool
+}
+
+// Needs is what p's steps need. A skill version its step would refuse
+// (never added as that skill, or connectors nobody reviewed) is an error
+// wrapping treadle.ErrInvalid.
+func Needs(ctx context.Context, p plan.Plan, lib SkillGrants) (Requirements, error) {
+	r := Requirements{Grant: pirn.Grant{}}
 	add := func(h pirn.Grant) {
 		for conn, t := range h {
-			old, ok := g[conn]
+			old, ok := r.Grant[conn]
 			switch {
-			case !ok:
-				g[conn] = t
 			case old.All || t.All:
-				g[conn] = pirn.Tools{All: true}
+				r.Grant[conn] = pirn.Tools{All: true}
 			default:
-				for n := range t.Names {
-					old.Names[n] = true
+				names := map[string]bool{}
+				if ok {
+					for n := range old.Names {
+						names[n] = true
+					}
 				}
+				for n := range t.Names {
+					names[n] = true
+				}
+				r.Grant[conn] = pirn.Tools{Names: names}
 			}
 		}
 	}
 	for _, n := range p.Nodes {
 		switch n.Activity {
 		case pirn.ActivityName:
-			claude = true
+			r.Claude = true
 		case pirn.AgentActivityName:
-			claude = true
+			r.Claude, r.Agent = true, true
 			if len(n.Args) > 1 {
 				h, err := pirn.ParseGrant(n.Args[1:])
 				if err != nil {
-					return nil, false, err
+					return Requirements{}, err
 				}
 				add(h)
 			}
 		case treadle.ActivityName:
-			claude = true
+			r.Claude, r.Agent = true, true
 			if lib == nil || len(n.Args) < 2 {
-				return nil, false, fmt.Errorf("loom: skill step %s: no library or no pinned version", n.ID)
+				return Requirements{}, fmt.Errorf("%w: skill step %s has no library or no pinned version", treadle.ErrInvalid, n.ID)
 			}
-			files, err := lib.Files(ctx, warp.ID(n.Args[1]))
+			h, err := lib.StepGrant(ctx, n.Args[0], warp.ID(n.Args[1]))
 			if err != nil {
-				return nil, false, err
-			}
-			h, err := treadle.Connectors(files[treadle.SkillFile])
-			if err != nil {
-				return nil, false, err
+				return Requirements{}, err
 			}
 			add(h)
 		}
 	}
-	return g, claude, nil
+	return r, nil
 }

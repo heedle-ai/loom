@@ -191,7 +191,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			if err != nil {
 				return loom.Readiness{}, err
 			}
-			return loom.CheckReady(ctx, p, lib, cs, vault)
+			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != ""})
 		}}
 		loom.RegisterWriter(w, writer)
 		loom.RegisterAsk(w, writer)
@@ -1045,6 +1045,9 @@ func readinessLines(r loom.Readiness) []string {
 		return []string{"can't tell if it can run: " + r.Error}
 	}
 	var out []string
+	if r.Agent != "" {
+		out = append(out, "missing  agent steps: "+r.Agent)
+	}
 	switch r.Claude {
 	case "key":
 		out = append(out, "missing  Claude: no ANTHROPIC_API_KEY; set it with: heedle secret set ANTHROPIC_API_KEY")
@@ -1055,6 +1058,9 @@ func readinessLines(r loom.Readiness) []string {
 		name := n.Connector
 		if len(n.Tools) > 0 {
 			name += " (" + strings.Join(n.Tools, ", ") + ")"
+		}
+		if len(n.Writes) > 0 {
+			name += ", which can change things: " + strings.Join(n.Writes, ", ") + map[bool]string{true: " (each waits for your approval)", false: " (without asking you)"}[n.Approve]
 		}
 		switch n.Problem {
 		case "":
@@ -1087,7 +1093,9 @@ func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, th
 	switch {
 	case p.Plan == nil:
 		return errors.New("there's no program to " + then)
-	case p.Ready != nil && !p.Ready.Ready:
+	case p.Ready == nil:
+		return errors.New("the worker didn't say whether it can run this: ask again")
+	case !p.Ready.Ready:
 		return errors.New("it can't run yet: set up what's missing above, then ask again")
 	case then == "schedule" && p.Schedule == nil:
 		return errors.New("the request doesn't say when to run it: ask again saying how often, or use -then run")
