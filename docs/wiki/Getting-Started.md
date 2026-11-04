@@ -27,8 +27,6 @@ For the Temporal CLI on Linux, use `brew install temporal` if you have Homebrew,
 The modules refer to each other by relative path until they're published:
 
 ```bash
-gh auth login        # once; bobbin, reed, pirn and treadle are private
-gh auth setup-git    # lets git clone them with your gh login
 mkdir -p ~/src/heedle-ai && cd ~/src/heedle-ai
 for r in weft draft shuttle warp bobbin reed pirn treadle loom; do git clone https://github.com/heedle-ai/$r.git; done
 cd loom

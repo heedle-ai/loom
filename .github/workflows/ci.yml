@@ -41,34 +41,26 @@ jobs:
         with:
           repository: heedle-ai/warp
           path: warp
-      - name: private-bobbin
-        # read-only deploy key on heedle-ai/bobbin
+      - name: sibling-bobbin
         uses: actions/checkout@v4
         with:
           repository: heedle-ai/bobbin
           path: bobbin
-          ssh-key: ${{ secrets.BOBBIN_DEPLOY_KEY }}
-      - name: private-reed
-        # read-only deploy key on heedle-ai/reed
+      - name: sibling-reed
         uses: actions/checkout@v4
         with:
           repository: heedle-ai/reed
           path: reed
-          ssh-key: ${{ secrets.REED_DEPLOY_KEY }}
-      - name: private-pirn
-        # read-only deploy key on heedle-ai/pirn
+      - name: sibling-pirn
         uses: actions/checkout@v4
         with:
           repository: heedle-ai/pirn
           path: pirn
-          ssh-key: ${{ secrets.PIRN_DEPLOY_KEY }}
-      - name: private-treadle
-        # read-only deploy key on heedle-ai/treadle
+      - name: sibling-treadle
         uses: actions/checkout@v4
         with:
           repository: heedle-ai/treadle
           path: treadle
-          ssh-key: ${{ secrets.TREADLE_DEPLOY_KEY }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: loom/go.mod
