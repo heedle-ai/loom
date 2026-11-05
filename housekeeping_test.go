@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -217,25 +218,30 @@ const (
 	idUnknown = "3000000000000000000000000000000000000000000000000000000000000003"
 	idNoRun   = "4000000000000000000000000000000000000000000000000000000000000004"
 	idWrite   = "5000000000000000000000000000000000000000000000000000000000000005"
+	idSkill   = "6000000000000000000000000000000000000000000000000000000000000006"
 	ps        = `[{"Id":"` + idRunning + `","Names":["a"],"State":"running","Created":1,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-a/plan","heedle.run":"p1","heedle.step":"n0"}},
  {"Id":"` + idEnded + `","Names":["b"],"State":"running","Created":2,"Labels":{"heedle.kind":"browse","heedle.workflow":"loom-b/plan","heedle.run":"p2","heedle.step":"n1"}},
  {"Id":"` + idUnknown + `","Names":["c"],"State":"running","Created":3,"Labels":{"heedle.kind":"container","heedle.workflow":"elsewhere/plan","heedle.run":"p9","heedle.step":"n0"}},
  {"Id":"` + idNoRun + `","Names":["d"],"State":"running","Created":4,"Labels":{"heedle.kind":"agent"}},
- {"Id":"` + idWrite + `","Names":["e"],"State":"running","Created":5,"Labels":{"heedle.kind":"connector","heedle.workflow":"loom-b","heedle.run":"r2"}}]`
+ {"Id":"` + idWrite + `","Names":["e"],"State":"running","Created":5,"Labels":{"heedle.kind":"connector","heedle.workflow":"loom-b","heedle.run":"r2"}},
+ {"Id":"` + idSkill + `","Names":["f"],"State":"running","Created":6,"Labels":{"heedle.kind":"agent","heedle.workflow":"skills-x","heedle.run":"s1"}}]`
 )
 
 func temporalWithRuns() *fakeTemporal {
 	return &fakeTemporal{runs: map[string]*workflowservice.DescribeWorkflowExecutionResponse{
 		"loom-a/plan p1": execution("loom-a/plan", "p1", plan.WorkflowName, enums.WORKFLOW_EXECUTION_STATUS_RUNNING, &commonpb.WorkflowExecution{WorkflowId: "loom-a", RunId: "r1"}),
 		"loom-b/plan p2": execution("loom-b/plan", "p2", plan.WorkflowName, enums.WORKFLOW_EXECUTION_STATUS_CANCELED, &commonpb.WorkflowExecution{WorkflowId: "loom-b", RunId: "r2"}),
+		"loom-a r1":      execution("loom-a", "r1", loom.RunWorkflowName, enums.WORKFLOW_EXECUTION_STATUS_RUNNING, nil),
 		"loom-b r2":      execution("loom-b", "r2", loom.RunWorkflowName, enums.WORKFLOW_EXECUTION_STATUS_FAILED, nil),
+		"skills-x s1":    execution("skills-x", "s1", loom.SkillsWorkflowName, enums.WORKFLOW_EXECUTION_STATUS_RUNNING, nil),
 	}}
 }
 
 // TestInv_ContainersShowTheirRuns: each container is shown with the run
 // it belongs to (a plan's step with the run that started the plan) and
 // that step's status; one Temporal doesn't know, or can't be asked about,
-// is unknown; each execution is asked about once (LOOM-502).
+// is unknown; only a container of a run (RunWorkflow) that is still
+// running can be stopped; each execution is asked about once (LOOM-502).
 func TestInv_ContainersShowTheirRuns(t *testing.T) {
 	r, _ := containerPodman(t, ps)
 	f := temporalWithRuns()
@@ -245,20 +251,23 @@ func TestInv_ContainersShowTheirRuns(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, c := range cs {
-		got[c.ID] = c.Workflow + " " + c.Run + " " + c.Status
+		got[c.ID] = fmt.Sprint(c.Workflow, " ", c.Run, " ", c.Status, " ", c.Stoppable)
 	}
-	want := map[string]string{idRunning: "loom-a r1 running", idEnded: "loom-b r2 canceled", idUnknown: "elsewhere/plan p9 unknown", idNoRun: "  ", idWrite: "loom-b r2 failed"}
+	// Review 50: the UI offered Stop run for any running workflow, a
+	// skill's creation included, which Cancel then refused.
+	want := map[string]string{idRunning: "loom-a r1 running true", idEnded: "loom-b r2 canceled false", idUnknown: "elsewhere/plan p9 unknown false",
+		idNoRun: "   false", idWrite: "loom-b r2 failed false", idSkill: "skills-x s1 running false"}
 	for id, w := range want {
 		if got[id] != w {
 			t.Errorf("%s… = %q, want %q", id[:4], got[id], w)
 		}
 	}
-	if len(f.asked) != 4 {
+	if len(f.asked) != 6 {
 		t.Errorf("Temporal was asked %d times: %q", len(f.asked), f.asked)
 	}
 	f.down = true
 	cs, err = loom.Containers(ctx, f, r)
-	if err != nil || len(cs) != 5 || cs[0].Status != "unknown" {
+	if err != nil || len(cs) != 6 || cs[0].Status != "unknown" || cs[0].Stoppable {
 		t.Errorf("with Temporal down: %+v, %v", cs, err)
 	}
 }
