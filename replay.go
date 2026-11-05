@@ -119,7 +119,10 @@ func scriptIn(ctx context.Context, s Records, c warp.CommitInfo, node string) (p
 // reads the step's run's input from Temporal (the first event of its
 // history, "<run>/plan"'s parent), so it knows the run's program and ref
 // exactly, and finds that program's last script for the step there
-// (LastScript). A step that isn't in a loom run has none.
+// (LastScript). A step that isn't in a loom run has none. It reads the
+// input with Temporal's default data converter, as loom's workers use: a
+// worker with a codec of its own would find no script, and its steps would
+// say why in their record (replay.why) and ask Claude.
 func Scripts(c client.Client, s Records) func(context.Context, string) (pirn.ActScript, bool, error) {
 	return func(ctx context.Context, node string) (pirn.ActScript, bool, error) {
 		if !activity.IsActivity(ctx) {
