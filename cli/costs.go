@@ -124,7 +124,7 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 		fmt.Fprintf(out, "your prices (%s) for: %v\n", pricesFile, prices.Yours)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "no runs asked Claude this month")
+		fmt.Fprintf(out, "no runs asked Claude in %s\n", from.Format("January 2006"))
 		return nil
 	}
 	keys := make([]key, 0, len(rows))
@@ -146,19 +146,26 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 			sched = "(not scheduled)"
 		}
 		c := loom.Cost(r.usage, prices)
-		est := "no price"
-		if c.Complete {
+		est := "no estimate"
+		switch _, priced := prices.Models[k.model]; {
+		case c.Complete:
 			est = usd(c.USD)
-		} else if k.model == "(no counts)" {
+		case k.model == "(no counts)":
 			est = "-"
+		case !priced:
+			est = "no price"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n", sched, k.model, len(r.runs), r.tokens.Input, r.tokens.Output, est)
 	}
 	tw.Flush()
 	c := loom.Cost(all, prices)
-	if c.Complete {
+	switch priced := len(all.Steps) - len(c.Unpriced); {
+	case c.Complete:
 		fmt.Fprintf(out, "total: %s est.\n", usd(c.USD))
-	} else {
+	case priced == 0:
+		// Never "$0.00" for what had no price (review 48).
+		fmt.Fprintf(out, "total: no estimate; %d steps have none (tokens only)\n", len(c.Unpriced))
+	default:
 		fmt.Fprintf(out, "total: %s est. for the steps with a price; %d steps have no estimate (tokens only)\n", usd(c.USD), len(c.Unpriced))
 	}
 	return nil

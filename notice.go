@@ -119,16 +119,6 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 			delete(w.told, k)
 		}
 	}
-	// Schedules a budget paused in an earlier month, to resume in a new
-	// one, resume (roadmap 10.4); each is told once, as it then runs.
-	resumed, err := ResumeBudgets(ctx, w.Client, w.Queue, now)
-	for _, name := range resumed {
-		out = append(out, Notice{Key: "resumed:" + name + ":" + now.UTC().Format("2006-01"), Schedule: name,
-			Title: "heedle: " + name + " resumed", Body: "A new month: its monthly budget starts again."})
-	}
-	if err != nil {
-		return out, err
-	}
 	// Writes waiting in runs going now.
 	running, err := w.list(ctx, fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus = 'Running'", RunWorkflowName, w.Queue))
 	if err != nil {
