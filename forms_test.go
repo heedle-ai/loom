@@ -102,24 +102,37 @@ func (e encoded) Get(v any) error {
 
 // TestInv_FormsAreDecidedOnlyWhileWaiting: the forms a run waits to send
 // are read from its act steps' heartbeats (summary, step, page and
-// screenshot); a decision is signalled only for a send waiting now, so a
-// person decides what they saw. (Roadmap 9.7.)
+// screenshot), less those the run has a decision on already (a heartbeat
+// lags); a decision is signalled only for a send waiting now and not yet
+// decided, so a person decides what they saw, and a second decision is
+// refused, not ignored. (Roadmap 9.7; review 41.)
 func TestInv_FormsAreDecidedOnlyWhileWaiting(t *testing.T) {
 	dc := converter.GetDefaultDataConverter()
 	beat, _ := dc.ToPayloads(pirn.ActBeat{Frame: reed.Frame{URL: "https://forms.example.org/x", JPEG: []byte{0xff, 0xd8, 0xff}},
 		Pending: &pirn.ActPending{ID: "f00d", Node: "n0", Summary: "Name Ada.", URL: "https://forms.example.org/x"}})
 	plain, _ := dc.ToPayloads(pirn.ActBeat{Frame: reed.Frame{URL: "https://forms.example.org/y", JPEG: []byte{0xff}}})
+	stale, _ := dc.ToPayloads(pirn.ActBeat{Frame: reed.Frame{URL: "https://forms.example.org/z", JPEG: []byte{0xff}},
+		Pending: &pirn.ActPending{ID: "cafe", Node: "n1", Summary: "Decided already.", URL: "https://forms.example.org/z"}})
 	c := &mocks.Client{}
 	c.On("DescribeWorkflowExecution", mock.Anything, "wf/plan", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
 		PendingActivities: []*workflow.PendingActivityInfo{
 			{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: beat},
 			{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: plain},
 			{ActivityType: &common.ActivityType{Name: "Browse"}, HeartbeatDetails: beat},
+			{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: stale},
 		},
 	}, nil)
+	decided := map[string]bool{"cafe": false}
+	c.On("QueryWorkflow", mock.Anything, "wf", "", loom.FormsQuery).Return(
+		func(context.Context, string, string, string, ...any) converter.EncodedValue {
+			v, _ := dc.ToPayloads(decided)
+			return encoded{v}
+		}, nil)
 	var signalled []loom.FormDecision
 	c.On("SignalWorkflow", mock.Anything, "wf", "", loom.FormSignal, mock.Anything).Run(func(a mock.Arguments) {
-		signalled = append(signalled, a.Get(4).(loom.FormDecision))
+		d := a.Get(4).(loom.FormDecision)
+		signalled = append(signalled, d)
+		decided[d.ID] = d.Send // the run keeps it
 	}).Return(nil)
 	forms, err := loom.PendingForms(ctx, c, "wf")
 	if err != nil || len(forms) != 1 || forms[0].ID != "f00d" || forms[0].Node != "n0" || forms[0].Summary != "Name Ada." || len(forms[0].JPEG) != 3 {
@@ -130,5 +143,13 @@ func TestInv_FormsAreDecidedOnlyWhileWaiting(t *testing.T) {
 	}
 	if err := loom.DecideForm(ctx, c, "wf", loom.FormDecision{ID: "beef", Send: true}); !errors.Is(err, pirn.ErrInvalid) || len(signalled) != 1 {
 		t.Errorf("deciding a form that isn't waiting: %v %v", err, signalled)
+	}
+	for _, id := range []string{"f00d", "cafe"} {
+		if err := loom.DecideForm(ctx, c, "wf", loom.FormDecision{ID: id, Send: false}); !errors.Is(err, pirn.ErrInvalid) || len(signalled) != 1 {
+			t.Errorf("a second decision on %s: %v %v", id, err, signalled)
+		}
+	}
+	if forms, _ := loom.PendingForms(ctx, c, "wf"); len(forms) != 0 {
+		t.Errorf("decided forms still listed: %+v", forms)
 	}
 }

@@ -130,7 +130,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	sendForm := fs.String("send", "", "forms: the ID of a form waiting to be sent, to send it")
 	cancelForm := fs.String("cancel", "", "forms: the ID of a form waiting to be sent, to cancel it (nothing is sent)")
-	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
+	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click and type on the hosts they name, stopping before each send to ask")
+	allowFreely := fs.Bool("allow-send-without-asking", false, "with -allow-act: also let act steps whose program says :send-without-asking submit forms without asking (roadmap 9.7)")
 	repoDir := fs.String("repo", "", "skills publish: a clone of your repository to publish the skill into, at skills/NAME (it commits; you push)")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	stopRun := fs.String("stop", "", "containers: the run (its workflow ID) to stop, through Temporal")
@@ -276,7 +277,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := actAllowed(p, *allowAct); err != nil {
+		if err := actAllowed(p, *allowAct, *allowFreely); err != nil {
 			return err
 		}
 		c, err := client.Dial(client.Options{HostPort: *address})
@@ -321,7 +322,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := actAllowed(p, *allowAct); err != nil {
+		if err := actAllowed(p, *allowAct, *allowFreely); err != nil {
 			return err
 		}
 		spec := loom.ScheduleSpec{Every: *every, Cron: *cron, TimeZone: *tz}
@@ -409,7 +410,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintf(out, "%s now at %s (from %s)\n", *to, head, *from)
 			return nil
 		}
-		wr, err := loom.SubmitMerge(ctx, c, *queue, loom.MergeInput{Into: *into, From: *from, Resolve: *resolve, AllowAct: *allowAct})
+		wr, err := loom.SubmitMerge(ctx, c, *queue, loom.MergeInput{Into: *into, From: *from, Resolve: *resolve, AllowAct: *allowAct, AllowSendFreely: *allowFreely})
 		if err != nil {
 			return err
 		}
@@ -441,7 +442,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		printProposal(out, p)
-		return askThen(ctx, out, c, *queue, *ref, *then, *allowAct, p)
+		return askThen(ctx, out, c, *queue, *ref, *then, *allowAct, *allowFreely, p)
 
 	case "write":
 		if fs.NArg() != 1 {
@@ -1148,12 +1149,17 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 
 // actAllowed refuses to run or schedule a plan with act steps unless the
 // person said -allow-act, saying what they would do: the card isn't the
-// only way in (review 39).
-func actAllowed(p plan.Plan, ok bool) error {
-	if len(loom.ActHosts(p)) == 0 || ok {
-		return nil
+// only way in (review 39). Steps that send without asking need
+// -allow-send-without-asking too, so a habit of -allow-act never lets
+// one through unseen (review 41).
+func actAllowed(p plan.Plan, ok, freely bool) error {
+	if len(loom.ActHosts(p)) > 0 && !ok {
+		return fmt.Errorf("its act steps %s: give -allow-act to let them", strings.Join(actDisclosures(p), "; "))
 	}
-	return fmt.Errorf("its act steps %s: give -allow-act to let them", strings.Join(actDisclosures(p), "; "))
+	if f := loom.ActSendsFreely(p); len(f) > 0 && !freely {
+		return fmt.Errorf("its act steps %s: give -allow-send-without-asking as well to let them", ActDisclosure(f, true))
+	}
+	return nil
 }
 
 // actDisclosures say what a plan's act steps may do, on which hosts:
@@ -1214,7 +1220,16 @@ func printProposal(out io.Writer, p loom.Proposal) {
 	}
 	if p.Plan != nil {
 		if d := actDisclosures(*p.Plan); len(d) > 0 {
-			fmt.Fprintf(out, "\nact steps %s\n", strings.Join(d, "; "))
+			fmt.Fprintln(out)
+			for _, line := range d {
+				// Sending without asking stands out, on its own line
+				// (review 41).
+				mark := ""
+				if strings.HasSuffix(line, "without asking again") {
+					mark = "! "
+				}
+				fmt.Fprintf(out, "%sact steps %s\n", mark, line)
+			}
 		}
 	}
 	if r := p.Ready; r != nil {
@@ -1276,7 +1291,7 @@ func readinessLines(r loom.Readiness) []string {
 
 // askThen does what -then says with a proposal: run it, or schedule it as
 // proposed; each only if the worker can run it now.
-func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, then string, allowAct bool, p loom.Proposal) error {
+func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, then string, allowAct, allowFreely bool, p loom.Proposal) error {
 	if then == "" {
 		if p.Plan != nil {
 			fmt.Fprintln(out, "\nRun it with -then run"+map[bool]string{true: ", or schedule it with -then schedule", false: ""}[p.Schedule != nil]+".")
@@ -1293,7 +1308,7 @@ func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, th
 	case then == "schedule" && p.Schedule == nil:
 		return errors.New("the request doesn't say when to run it: ask again saying how often, or use -then run")
 	}
-	if err := actAllowed(*p.Plan, allowAct); err != nil {
+	if err := actAllowed(*p.Plan, allowAct, allowFreely); err != nil {
 		return err
 	}
 	in := loom.RunInput{Program: p.Program, Plan: *p.Plan, Ref: ref}
@@ -1425,8 +1440,15 @@ func formsCommand(ctx context.Context, out io.Writer, c client.Client, workflowI
 		return nil
 	}
 	for _, f := range forms {
-		fmt.Fprintf(out, "%s  step %s  %s\n  %s\n  send it: loom forms -workflow %s -send %s\n  cancel it: loom forms -workflow %s -cancel %s\n",
-			f.ID, f.Node, f.URL, f.Summary, workflowID, f.ID, workflowID, f.ID)
+		fmt.Fprintf(out, "%s  step %s  %s\n  %s\n", f.ID, f.Node, f.URL, f.Summary)
+		// The filled form, to look at before deciding (review 41).
+		if shot, err := os.CreateTemp("", "loom-form-"+f.ID+"-*.jpg"); err == nil {
+			_, werr := shot.Write(f.JPEG)
+			if shot.Close() == nil && werr == nil {
+				fmt.Fprintf(out, "  the filled form: %s\n", shot.Name())
+			}
+		}
+		fmt.Fprintf(out, "  send it: loom forms -workflow %s -send %s\n  cancel it: loom forms -workflow %s -cancel %s\n", workflowID, f.ID, workflowID, f.ID)
 	}
 	return nil
 }

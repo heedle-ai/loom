@@ -98,9 +98,15 @@ func Confirmer(c client.Client) func(context.Context, pirn.ActPending) (bool, er
 }
 
 // PendingForms are the sends waiting for a person in run workflowID, read
-// from its act steps' heartbeats (its plan, "<run>/plan").
+// from its act steps' heartbeats (its plan, "<run>/plan"), less those the
+// run has a decision on already: a heartbeat can lag a decision by up to
+// a minute (review 41).
 func PendingForms(ctx context.Context, c client.Client, workflowID string) ([]PendingForm, error) {
 	d, err := c.DescribeWorkflowExecution(ctx, workflowID+"/plan", "")
+	if err != nil {
+		return nil, err
+	}
+	decided, err := decidedForms(ctx, c, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -113,13 +119,31 @@ func PendingForms(ctx context.Context, c client.Client, workflowID string) ([]Pe
 		if converter.GetDefaultDataConverter().FromPayloads(a.GetHeartbeatDetails(), &b) != nil || b.Pending == nil {
 			continue
 		}
+		if _, ok := decided[b.Pending.ID]; ok {
+			continue
+		}
 		out = append(out, PendingForm{Node: b.Pending.Node, ID: b.Pending.ID, Summary: b.Pending.Summary, URL: b.Pending.URL, JPEG: b.JPEG})
 	}
 	return out, nil
 }
 
+// decidedForms are the decisions run workflowID has had (FormsQuery).
+func decidedForms(ctx context.Context, c client.Client, workflowID string) (map[string]bool, error) {
+	v, err := c.QueryWorkflow(ctx, workflowID, "", FormsQuery)
+	if err != nil {
+		return nil, err
+	}
+	var decided map[string]bool
+	if err := v.Get(&decided); err != nil {
+		return nil, err
+	}
+	return decided, nil
+}
+
 // DecideForm sends or cancels a pending send in run workflowID: only one
-// that is pending there now, so a decision is on a send someone saw.
+// that is pending there now and not decided already, so a decision is on
+// a send someone saw, and a second one is refused rather than ignored
+// (review 41).
 func DecideForm(ctx context.Context, c client.Client, workflowID string, d FormDecision) error {
 	pending, err := PendingForms(ctx, c, workflowID)
 	if err != nil {

@@ -335,6 +335,9 @@ type MergeInput struct {
 	// submit forms on their hosts without asking (review 39); without it
 	// such a merge is refused before anything runs.
 	AllowAct bool `json:"allowAct,omitempty"`
+	// AllowSendFreely lets a "rerun" run act steps whose program says
+	// :send-without-asking (roadmap 9.7, review 41).
+	AllowSendFreely bool `json:"allowSendWithoutAsking,omitempty"`
 }
 
 // MergeRecordInput is what the merge activities work on.
@@ -345,11 +348,13 @@ type MergeRecordInput struct {
 	// Rerun lists the questions this workflow ran again on Into; with
 	// Resolve "rerun", only these conflicts may be settled.
 	Rerun []string
-	// AllowAct: MergePlan may plan re-runs of act steps (MergeInput's).
-	AllowAct   bool
-	WorkflowID string
-	RunID      string
-	At         time.Time
+	// AllowAct: MergePlan may plan re-runs of act steps (MergeInput's),
+	// and AllowSendFreely of those that send without asking.
+	AllowAct        bool
+	AllowSendFreely bool
+	WorkflowID      string
+	RunID           string
+	At              time.Time
 }
 
 // Kinds of merge result.
@@ -399,7 +404,7 @@ func MergeWorkflow(ctx workflow.Context, in MergeInput) (MergeResult, error) {
 	}
 	info := workflow.GetInfo(ctx)
 	rec := MergeRecordInput{
-		Into: in.Into, Theirs: theirs, Resolve: in.Resolve, AllowAct: in.AllowAct,
+		Into: in.Into, Theirs: theirs, Resolve: in.Resolve, AllowAct: in.AllowAct, AllowSendFreely: in.AllowSendFreely,
 		WorkflowID: info.WorkflowExecution.ID, RunID: info.WorkflowExecution.RunID, At: workflow.Now(ctx),
 	}
 	var res MergeResult
@@ -466,7 +471,11 @@ func (r *Recorder) MergePlan(ctx context.Context, in MergeRecordInput) ([]Confli
 	for _, c := range pm.conflicts {
 		if hosts := ActHosts(c.Rerun.Plan); len(hosts) > 0 && !in.AllowAct {
 			return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
-				"re-running %q would run act steps that can click, type and submit forms on %s without asking again: allow it to (-allow-act)", c.Question, strings.Join(hosts, ", ")), "InvalidInput", nil)
+				"re-running %q would run act steps that can click and type on %s, and submit forms there once you confirm: allow it to (-allow-act)", c.Question, strings.Join(hosts, ", ")), "InvalidInput", nil)
+		}
+		if f := ActSendsFreely(c.Rerun.Plan); len(f) > 0 && !in.AllowSendFreely {
+			return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"re-running %q would run act steps that can click, type and submit forms on %s without asking again: allow it to (-allow-send-without-asking)", c.Question, strings.Join(f, ", ")), "InvalidInput", nil)
 		}
 	}
 	return pm.conflicts, nil
