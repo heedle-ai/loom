@@ -680,3 +680,60 @@ func TestInv_ActNeedsAllowAct(t *testing.T) {
 		t.Errorf("no act step: %v", err)
 	}
 }
+
+// TestInv_MemoryCommand: loom memory lists what heedle remembers (the
+// file it reads, or heedle up's ~/.heedle/memory.json), adds with -add
+// (refusing a secret without repeating it), and forgets with -forget ID
+// or -forget-all, each gone from the file; it takes one of them at a
+// time. (Roadmap 10.1.)
+func TestInv_MemoryCommand(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out bytes.Buffer
+	call := func(args ...string) error {
+		out.Reset()
+		return run(ctx, append([]string{"memory"}, args...), &out)
+	}
+	if err := call(); err != nil || !strings.Contains(out.String(), "remembers nothing") || !strings.Contains(out.String(), home+"/.heedle/memory.json") {
+		t.Errorf("empty: %v %s", err, out.String())
+	}
+	if err := call("-add", "Vegetarian."); err != nil || !strings.HasPrefix(out.String(), "remembered m") {
+		t.Fatalf("add: %v %s", err, out.String())
+	}
+	id := strings.Fields(out.String())[1]
+	id = strings.TrimSuffix(id, ":")
+	call("-add", "Home airport: IAD.")
+	if err := call(); err != nil || !strings.Contains(out.String(), id+"  added ") || !strings.Contains(out.String(), "never used  Vegetarian.") || !strings.Contains(out.String(), "IAD") {
+		t.Errorf("list: %v %s", err, out.String())
+	}
+	if err := call("-add", "my password is hunter2"); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("a password: %v", err)
+	}
+	if err := call("-forget", id); err != nil {
+		t.Fatal(err)
+	}
+	file := home + "/.heedle/memory.json"
+	b, _ := os.ReadFile(file)
+	if strings.Contains(string(b), "Vegetarian") || !strings.Contains(string(b), "IAD") {
+		t.Errorf("after -forget: %s", b)
+	}
+	if err := call("-forget-all"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(file); strings.TrimSpace(string(b)) != "[]" {
+		t.Errorf("after -forget-all: %s", b)
+	}
+	other := t.TempDir() + "/m.json"
+	if err := call("-memory", other, "-add", "Aisle seats."); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(other); !strings.Contains(string(b), "Aisle seats.") {
+		t.Errorf("-memory FILE: %s", b)
+	}
+	for _, bad := range [][]string{{"-add", "x", "-forget-all"}, {"-forget", "m000000000000"}, {"stray"}} {
+		if err := call(bad...); err == nil {
+			t.Errorf("%q: no error", bad)
+		}
+	}
+}

@@ -104,6 +104,9 @@ type Writer struct {
 	// Ready, if set, tells Ask whether a proposal's plan can run now on
 	// this worker (CheckReady with its library, connectors and keys).
 	Ready func(ctx context.Context, p plan.Plan) (Readiness, error)
+	// MemoryFile, if set, is what this worker's front door remembers about
+	// the person (ReadMemory), sent to Claude with every request.
+	MemoryFile string
 }
 
 // ErrNoProgram is a description Claude couldn't write a compiling program

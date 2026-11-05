@@ -128,6 +128,46 @@ Shuttle-Run: 0a1b2c3d-run-1
 
 The `Shuttle-Workflow` value is what you search for in Temporal's Web UI to see the execution behind a commit: its timings, retries and full event history.
 
+## 6. What heedle remembers
+
+The front door (`loom ask`, or **Ask heedle** in drawdown) sends Claude what you've asked heedle to remember about you with every request, and the proposal says which ([How It Works → Memory you can see](How-It-Works#the-front-door-ask)). A worker reads it from `-memory FILE`; heedle up's is `~/.heedle/memory.json`, which `loom memory` uses unless you give `-memory FILE`:
+
+```bash
+loom memory -add "Vegetarian."
+loom memory -add "Home airport: IAD."
+loom memory
+```
+
+```
+remembered m78fbf5839f81: Vegetarian.
+remembered mba723a3ad8f0: Home airport: IAD.
+heedle remembers, and sends to Claude with every request (/home/you/.heedle/memory.json):
+  m78fbf5839f81  added 2026-11-05, never used  Vegetarian.
+  mba723a3ad8f0  added 2026-11-05, never used  Home airport: IAD.
+```
+
+It won't keep a secret:
+
+```bash
+loom memory -add "my password is hunter2"
+```
+
+```
+loom: heedle can't remember that: that looks like a password, which heedle never remembers (keep keys in your keychain: heedle secret set NAME)
+```
+
+Forget one by its ID, or everything; either rewrites the file without them:
+
+```bash
+loom memory -forget m78fbf5839f81
+loom memory -forget-all
+```
+
+```
+forgot m78fbf5839f81; it's gone from /home/you/.heedle/memory.json
+forgot everything; /home/you/.heedle/memory.json is empty
+```
+
 ## Troubleshooting
 
 | Symptom | Cause |
