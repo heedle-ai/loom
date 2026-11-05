@@ -243,6 +243,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err := actAllowed(p, *allowAct, *allowFreely); err != nil {
 			return err
 		}
+		noteUses(out, p)
 		c, err := client.Dial(client.Options{HostPort: *address})
 		if err != nil {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
@@ -288,6 +289,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err := actAllowed(p, *allowAct, *allowFreely); err != nil {
 			return err
 		}
+		noteUses(out, p)
 		spec := loom.ScheduleSpec{Every: *every, Cron: *cron, TimeZone: *tz}
 		in := loom.RunInput{Program: src, Plan: p, Ref: *ref}
 		if _, err := loom.ScheduleOptions(ctx, *queue, *scheduleNameFlag, in, spec); err != nil {
@@ -956,6 +958,9 @@ var isTerminal = func() bool {
 // it is never an argument, so neither the screen, the shell's history nor
 // a process listing shows it.
 func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
+	if pirn.IsProfileName(name) {
+		return fmt.Errorf("%s is one of your details: change it under You on the Connectors page (heedle up), or forget every secret with delete --all", name)
+	}
 	if op == "delete" {
 		if err := vault.Delete(ctx, name); err != nil {
 			return err
@@ -1088,6 +1093,15 @@ func actDisclosures(p plan.Plan) []string {
 	return out
 }
 
+// noteUses says, before a run or schedule starts, which of the person's
+// details its act steps may use: -allow-act lets them, so the person
+// still sees which (review 42).
+func noteUses(out io.Writer, p plan.Plan) {
+	if u := loom.ActUses(p); len(u) > 0 {
+		fmt.Fprintf(out, "act steps %s\n", UsesDisclosure(u))
+	}
+}
+
 // UsesDisclosure says which of the person's details act steps may use
 // (roadmap 9.8): "may use your name, email address and date of birth".
 func UsesDisclosure(fields []string) string {
@@ -1217,6 +1231,7 @@ func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, th
 	if err := actAllowed(*p.Plan, allowAct, allowFreely); err != nil {
 		return err
 	}
+	noteUses(out, *p.Plan)
 	in := loom.RunInput{Program: p.Program, Plan: *p.Plan, Ref: ref}
 	if then == "schedule" {
 		if err := loom.CreateSchedule(ctx, c, queue, p.Name, in, *p.Schedule); err != nil {
