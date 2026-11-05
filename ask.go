@@ -616,6 +616,30 @@ func ActHosts(p plan.Plan) []string {
 	return out
 }
 
+// ActUses are the person's details p's act steps may use (:uses), in
+// pirn.ProfileFields' order, each once: disclosed with the hosts (roadmap
+// 9.8).
+func ActUses(p plan.Plan) []string {
+	used := map[string]bool{}
+	for _, n := range p.Nodes {
+		if n.Activity != pirn.ActActivityName {
+			continue
+		}
+		if u, ok := pirn.ActUses(n.Args); ok {
+			for _, f := range u {
+				used[f] = true
+			}
+		}
+	}
+	var out []string
+	for _, f := range pirn.ProfileFields {
+		if used[f] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ActSendsFreely are the hosts of p's act steps whose program lets them
 // send without asking (:send-without-asking), sorted, each once: the ones
 // a front door discloses in red (roadmap 9.7). Every other act step stops
