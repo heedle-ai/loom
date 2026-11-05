@@ -614,7 +614,7 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 		"skill to run": {loom.Proposal{Summary: "s", Skill: "a skill"}, "schedule"},
 		"unknown":      {loom.Proposal{Summary: "s", Program: "(echo)", Plan: &pl}, "run"}, // review 33
 	} {
-		if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, c.then, c.p); err == nil {
+		if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, c.then, false, c.p); err == nil {
 			t.Errorf("%s: -then %s went ahead", name, c.then)
 		}
 	}
@@ -644,5 +644,39 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 	printProposal(&out, loom.Proposal{Summary: "Hi.", Program: `(echo "hi")`, Plan: &echo})
 	if strings.Contains(out.String(), "submit forms") {
 		t.Errorf("disclosed without an act step:\n%s", out.String())
+	}
+}
+
+// TestInv_ActNeedsAllowAct: loom run, loom schedule and loom ask -then
+// refuse a program with act steps unless -allow-act is given, saying what
+// they would do on which hosts, before Temporal is reached; a program
+// without act steps needs nothing. (Review 39: only the card disclosed
+// it, and other ways in ran act steps unannounced.)
+func TestInv_ActNeedsAllowAct(t *testing.T) {
+	ctx := context.Background()
+	prog := `(act "Join as Ada" "https://forms.example.org/" "cdn.example.org")`
+	want := "can click, type and submit forms on cdn.example.org, forms.example.org without asking again: give -allow-act"
+	for _, args := range [][]string{
+		{"run", "-address", "127.0.0.1:1", prog},
+		{"schedule", "-name", "s", "-every", "24h", "-address", "127.0.0.1:1", prog},
+	} {
+		if err := run(ctx, args, io.Discard); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: %v", args[0], err)
+		}
+		// With -allow-act it goes on, to Temporal (which isn't there).
+		if err := run(ctx, append(args[:1:1], append([]string{"-allow-act"}, args[1:]...)...), io.Discard); err == nil || strings.Contains(err.Error(), "-allow-act") {
+			t.Errorf("%v -allow-act: %v", args[0], err)
+		}
+	}
+	pl, err := loom.Compile(ctx, registry(), prog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := loom.Proposal{Program: prog, Plan: &pl, Ready: &loom.Readiness{Ready: true}}
+	if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, "run", false, p); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("ask -then run: %v", err)
+	}
+	if err := actAllowed(plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo"}}}, false); err != nil {
+		t.Errorf("no act step: %v", err)
 	}
 }

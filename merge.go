@@ -331,6 +331,10 @@ type MergeInput struct {
 	Into    string `json:"into"`
 	From    string `json:"from"`
 	Resolve string `json:"resolve,omitempty"`
+	// AllowAct lets a "rerun" run act steps again, which click, type and
+	// submit forms on their hosts without asking (review 39); without it
+	// such a merge is refused before anything runs.
+	AllowAct bool `json:"allowAct,omitempty"`
 }
 
 // MergeRecordInput is what the merge activities work on.
@@ -340,7 +344,9 @@ type MergeRecordInput struct {
 	Resolve string
 	// Rerun lists the questions this workflow ran again on Into; with
 	// Resolve "rerun", only these conflicts may be settled.
-	Rerun      []string
+	Rerun []string
+	// AllowAct: MergePlan may plan re-runs of act steps (MergeInput's).
+	AllowAct   bool
 	WorkflowID string
 	RunID      string
 	At         time.Time
@@ -393,7 +399,7 @@ func MergeWorkflow(ctx workflow.Context, in MergeInput) (MergeResult, error) {
 	}
 	info := workflow.GetInfo(ctx)
 	rec := MergeRecordInput{
-		Into: in.Into, Theirs: theirs, Resolve: in.Resolve,
+		Into: in.Into, Theirs: theirs, Resolve: in.Resolve, AllowAct: in.AllowAct,
 		WorkflowID: info.WorkflowExecution.ID, RunID: info.WorkflowExecution.RunID, At: workflow.Now(ctx),
 	}
 	var res MergeResult
@@ -454,6 +460,14 @@ func (r *Recorder) MergePlan(ctx context.Context, in MergeRecordInput) ([]Confli
 	pm, err := r.plan(ctx, in)
 	if err != nil {
 		return nil, classify(err)
+	}
+	// Re-running a question with act steps submits its form again: only
+	// if the person allowed it, and refused before anything runs (review 39).
+	for _, c := range pm.conflicts {
+		if hosts := ActHosts(c.Rerun.Plan); len(hosts) > 0 && !in.AllowAct {
+			return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"re-running %q would run act steps that can click, type and submit forms on %s without asking again: allow it to (-allow-act)", c.Question, strings.Join(hosts, ", ")), "InvalidInput", nil)
+		}
 	}
 	return pm.conflicts, nil
 }
