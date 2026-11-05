@@ -280,6 +280,9 @@ func TestInv_BudgetsFailClosed(t *testing.T) {
 		t.Errorf("bound: %+v %v %v", c, most, ok)
 	}
 
+	if _, err := loom.RunsBetween(ctx, newStore(t), loom.DefaultRef, nov, nov, ""); err == nil {
+		t.Error(`RunsBetween took "" as a schedule`)
+	}
 	if _, ok := loom.BudgetPaused("paused: monthly budget $0.10 reached (at most $0.10, est.) in November 2026"); !ok {
 		t.Error("a bound's note isn't read as a budget's")
 	}
