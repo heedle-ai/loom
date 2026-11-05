@@ -598,10 +598,11 @@ func Needs(ctx context.Context, p plan.Plan, lib SkillGrants) (Requirements, err
 	return r, nil
 }
 
-// ActHosts are the hosts p's act steps may click, type and submit forms
-// on, without asking again: each step's start page's host and further
-// hosts, as reed's allowlist reads them (pirn.ActHosts), sorted, each
-// once. A front door discloses them before a run (roadmap 9.5).
+// ActHosts are the hosts p's act steps may click and type on: each
+// step's start page's host and further hosts, as reed's allowlist reads
+// them (pirn.ActHosts), sorted, each once. A front door discloses them
+// before a run (roadmap 9.5); ActSendsFreely says which send without
+// asking (roadmap 9.7).
 func ActHosts(p plan.Plan) []string {
 	var out []string
 	for _, n := range p.Nodes {
@@ -609,6 +610,24 @@ func ActHosts(p plan.Plan) []string {
 			continue
 		}
 		if h, ok := pirn.ActHosts(n.Args); ok {
+			out = unionHosts(out, h)
+		}
+	}
+	return out
+}
+
+// ActSendsFreely are the hosts of p's act steps whose program lets them
+// send without asking (:send-without-asking), sorted, each once: the ones
+// a front door discloses in red (roadmap 9.7). Every other act step stops
+// before it sends and asks.
+func ActSendsFreely(p plan.Plan) []string {
+	var out []string
+	for _, n := range p.Nodes {
+		if n.Activity != pirn.ActActivityName {
+			continue
+		}
+		if f, ok := pirn.ActSendsFreely(n.Args); ok && f {
+			h, _ := pirn.ActHosts(n.Args)
 			out = unionHosts(out, h)
 		}
 	}
