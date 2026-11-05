@@ -503,6 +503,11 @@ var ErrTooManyRuns = errors.New("loom: too many records to add up")
 func RunsBetween(ctx context.Context, s Records, ref string, from, to time.Time, schedules ...string) ([]RunUsage, error) {
 	only := map[string]bool{}
 	for _, n := range schedules {
+		if n == "" {
+			// "" names no schedule: never read as "runs no schedule
+			// started", which would count short (review 48 round 3).
+			return nil, fmt.Errorf("%w: RunsBetween given an empty schedule name", warp.ErrInvalid)
+		}
 		only[n] = true
 	}
 	head, ok, err := s.Resolve(ctx, ref)

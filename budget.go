@@ -258,7 +258,7 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 		}
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("%d of its steps this month have no estimate (step %s: %s)", len(c.Unpriced), x.Node, x.Why)))
 	case most >= b.Budget.USD && !c.Complete:
-		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("at most $%.2f", most)))
+		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("at most $%.2f", math.Ceil(most*100-1e-9)/100)))
 	case most >= b.Budget.USD:
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, ""))
 	}
