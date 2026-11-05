@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -166,5 +167,34 @@ func TestInv_SkillsAreCreatedForReview(t *testing.T) {
 	}
 	if loom.ChangeTimeout(loom.SkillsCreate) != loom.SkillsCreateTimeout || loom.ChangeTimeout(loom.SkillsImport) != loom.SkillsTimeout {
 		t.Error("timeouts")
+	}
+}
+
+// TestInv_PinnedImportsReachTheWorker: an import asked for with the
+// commit a catalog listed reaches the worker's library with that commit:
+// it's imported from it, and refused once the branch has moved on.
+// (Roadmap 10.6, review 49: only a commit that isn't one was tested.)
+func TestInv_PinnedImportsReachTheWorker(t *testing.T) {
+	dir := t.TempDir()
+	write := func(desc string) string {
+		os.MkdirAll(filepath.Join(dir, "skills", "trip"), 0o755)
+		os.WriteFile(filepath.Join(dir, "skills", "trip", "SKILL.md"), []byte("---\nname: trip\ndescription: "+desc+"\n---\nPlan it.\n"), 0o644)
+		for _, c := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", desc}} {
+			if out, err := exec.Command("git", append([]string{"-C", dir}, c...)...).CombinedOutput(); err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+		}
+		out, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		return strings.TrimSpace(string(out))
+	}
+	exec.Command("git", "init", "-q", "-b", "main", dir).Run()
+	seen := write("Plans trips.")
+	src := &treadle.Source{Repo: "file://" + dir, Path: "skills/trip", Commit: seen}
+	if sk, err := changeSkills(t, &treadle.Library{Store: newStore(t)}, loom.SkillsChange{Op: loom.SkillsImport, Source: src}); err != nil || sk.Source.Commit != seen {
+		t.Fatalf("pinned: %+v %v", sk, err)
+	}
+	write("Plans trips, with tiles.")
+	if _, err := changeSkills(t, &treadle.Library{Store: newStore(t)}, loom.SkillsChange{Op: loom.SkillsImport, Source: src}); !refused(err) || !strings.Contains(err.Error(), "changed since it was listed") {
+		t.Errorf("moved on: %v", err)
 	}
 }
