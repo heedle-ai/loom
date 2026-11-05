@@ -6,12 +6,13 @@
 func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error)
 ```
 
-1. Check the input before anything runs. Every node ID must be a valid Git tree entry name (`warp.ValidName`, no I/O). Then the **`Check`** local activity verifies that the ref passes `git check-ref-format` and that the program, compiled with the worker's registry, gives exactly `in.Plan` (compared as `PlanJSON`). Bad names or refs fail at once with the non-retryable error type `InvalidInput`; a plan the program doesn't compile to fails with `ProgramPlanMismatch`. A client can't record a plan its program didn't produce. An empty ref means `refs/loom/runs`.
-2. Run `in.Plan` as shuttle's `PlanWorkflow`, as a **child workflow** with ID `<run workflow ID>/plan`. loom doesn't wrap or change it.
-3. Run the **`Record`** activity with the program, plan, results, ref, the Temporal workflow and run IDs, and `workflow.Now`.
-4. Return the outputs and the commit ID.
+1. A run a schedule started first checks the schedule's monthly budget ([Costs and budgets](#costs-and-budgets)): over it, the run ends here, having run and recorded nothing.
+2. Check the input before anything runs. Every node ID must be a valid Git tree entry name (`warp.ValidName`, no I/O). Then the **`Check`** local activity verifies that the ref passes `git check-ref-format` and that the program, compiled with the worker's registry, gives exactly `in.Plan` (compared as `PlanJSON`). Bad names or refs fail at once with the non-retryable error type `InvalidInput`; a plan the program doesn't compile to fails with `ProgramPlanMismatch`. A client can't record a plan its program didn't produce. An empty ref means `refs/loom/runs`.
+3. Run `in.Plan` as shuttle's `PlanWorkflow`, as a **child workflow** with ID `<run workflow ID>/plan`. loom doesn't wrap or change it.
+4. Run the **`Record`** activity with the program, plan, results, ref, the Temporal workflow and run IDs, `workflow.Now` and, for a scheduled run, its schedule's name.
+5. Return the outputs and the commit ID.
 
-`RunWorkflow` uses only Temporal workflow APIs, so it replays deterministically. All Git I/O happens inside `Check` and `Record`; `TestInv_WorkflowsDoNoIO` keeps it that way.
+`RunWorkflow` uses only Temporal workflow APIs, so it replays deterministically. All Git I/O happens inside the budget check, `Check` and `Record`; `TestInv_WorkflowsDoNoIO` keeps it that way.
 
 ## The record
 
@@ -139,6 +140,28 @@ It prints the program, then a line saying how many steps it has and on which att
 ## Notices
 
 A person who isn't watching should still hear when something needs them. `Watcher.Check` finds, on a task queue, each run a loom schedule started (Temporal's `TemporalScheduledById` names `loom-schedule-…`) that ended since it began watching, finished or not (a run that fails or times out pauses its schedule, and the notice says so; a canceled one doesn't), and each write waiting for approval in a run going now (`WritesQuery`, asked of at most 25 runs a look, `MaxRunsAsked`, each within 3 seconds). It reads every page of Temporal's list (up to 1,000 runs) and tells each thing once, however often it looks; it forgets runs that ended well before it last looked and writes no longer waiting, so what it remembers stays small. A run you started yourself isn't news (`TestInv_NoticesAreToldOnce`). `heedle up` shows them as the system's notifications.
+
+## Costs and budgets
+
+What a run used of Claude is in its record already: every ask, agent, act and skill step's output is pirn's result, with the model and the input and output tokens Claude counted (an agent, act or skill step's summed over all its turns). `UsageOf(plan, outputs)` reads them from those steps only (by their activity: another step's output is never read as usage, whatever it holds), one `StepUsage` per step, and nothing is asked of Anthropic. A Claude step whose output has no counts is listed as missing, with why, never counted as zero (`TestInv_UsageIsExact`, `TestInv_UsageSaysWhatIsMissing`). `RecordUsage` reads a record's `plan.json` and `outputs/`; `RunsBetween` and `AllRunsBetween` add up the runs recorded in a time window (at most `MaxCostWalk`, 20,000 records back). A proposal carries what the front door's own asks used, one step per attempt (`Proposal.Usage`, `TestInv_ProposalSaysWhatItUsed`). Tokens are facts. They aren't everything you're billed for: an attempt that failed and was retried isn't recorded, and neither is a proposal that never checked, so neither is counted. pirn doesn't use prompt caching, so records have no cache tokens.
+
+Dollars are estimates. `Cost(usage, prices)` prices each step with a table in USD per million tokens: `prices.json`, built in, from [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) as of 2026-11-05, which every figure names (`Costs.AsOf`). A model with no price gets no dollar figure: it is in `Unpriced` with its tokens and why, and `Complete` is false (`TestInv_NoPriceNoDollars`). A model priced by prompt size (Claude Haiku 5.5, above 100,000 tokens) is priced at the right tier for a single request, and not at all for a step whose several requests together pass the size, since the split isn't recorded. `~/.heedle/prices.json` (`-prices`) replaces the prices of the models it names, one by one, and no others; give only `"models"`:
+
+```json
+{"models": {"claude-sonnet-5-5": {"input": 2, "output": 10}}}
+```
+
+A file heedle can't use (not strict JSON, an unknown field, a price that isn't a number from 0 to 1,000,000, a name that isn't a model ID, more than 1 MiB) is refused, saying why, and the built-in table is used (`ReadPrices`, `TestInv_PricesFileOverridesOnlyWhatItNames`, `TestInv_BuiltinPricesAreChecked`). heedle isn't connected to your Anthropic account and never claims to know your bill.
+
+**Budgets.** A schedule may have a monthly budget in USD, in whole cents (`loom schedule -budget 5`, or `loom schedules -name NAME -budget 5` for one that exists; 0 removes it). It is kept in the schedule's action memo (`loom-budget`), since Temporal can change a schedule's action but never its own memo.
+
+[[/images/budget.svg|alt=String diagram of a scheduled run with a budget: scheduled run = budget ; (run + stop). Under the budget the run goes on as any run; at or over it, or unpriced, the schedule is paused and nothing runs or is recorded]]
+
+Before a run a schedule started does anything else, even the program check, `RunWorkflow` runs the `LoomBudget` activity (`Recorder.Budget`). It reads the schedule's budget and time zone from Temporal, adds up that schedule's runs this calendar month in that time zone (UTC for one that runs every so often), as recorded on the run's ref (each record names its schedule, `Loom-Schedule`), and prices them with the worker's prices. At or over the budget, it pauses the schedule with the note `paused: monthly budget $5.00 reached (est.) in November 2026`, and the run ends there, having started no step and recorded nothing (`RunResult.Skipped`). If any of those runs can't be priced, or there are too many to add up, the budget can't be checked, so it pauses the schedule saying why rather than run on a guess. A worker with no `Recorder.Schedules` fails every scheduled run rather than run one unchecked; `loom worker` and drawdown's worker give theirs. A run you start yourself is never checked (`TestInv_BudgetIsCheckedBeforeAnyStep`, `TestInv_BudgetThatCantBeCheckedPauses`, `TestInv_BudgetMonthFollowsTheTimeZone`).
+
+A budget can't stop a run already going, and one run can go over it: the check is before each run. Raising a budget (or removing it) resumes a schedule its budget paused, and its next run is checked against the new one; resuming it without raising it pauses it again at its next run while the month is still over. `-resume-next-month` makes a new month, in the schedule's time zone, resume a schedule its budget paused (`ResumeBudgets`, which the watcher runs). The watcher tells, once, of a run its budget stopped, as a pause of that schedule, and of a schedule a new month resumed (`TestInv_BudgetPauseIsToldOnce`, `TestE2E_BudgetPausesASchedule` on a real Temporal server).
+
+`loom costs -store DIR` prints a month (`-month 2026-11`; this one by default; months in `-tz`, UTC by default) by schedule and model: runs, tokens and the estimate, "no price" where there's none (`TestInv_CostsCommand`).
 
 ## Naming
 

@@ -84,6 +84,7 @@ func TestInv_NoticesAreToldOnce(t *testing.T) {
 	}
 	c := &mocks.Client{}
 	c.On("ListWorkflow", mock.Anything, mock.Anything).Return(l.list, nil)
+	noSchedules(c)
 	waiting := true
 	v := &mocks.Value{}
 	v.On("Get", mock.Anything).Run(func(args mock.Arguments) {

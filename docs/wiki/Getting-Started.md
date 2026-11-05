@@ -128,6 +128,38 @@ Shuttle-Run: 0a1b2c3d-run-1
 
 The `Shuttle-Workflow` value is what you search for in Temporal's Web UI to see the execution behind a commit: its timings, retries and full event history.
 
+## 6. See what runs cost
+
+Every Claude step's record has its model and tokens; `costs` adds up a month of them (this one by default), by schedule and model, with an estimate in dollars from the built-in prices ([Costs and budgets](How-It-Works#costs-and-budgets)). The worker keeps recording to the same store:
+
+```bash
+go run ./cmd/loom costs -store ~/heedle-store.git
+go run ./cmd/loom costs -store ~/heedle-store.git -month 2026-11 -tz Europe/Lisbon
+```
+
+```text
+Claude usage in November 2026 (Europe/Lisbon), as recorded; dollars are estimates (est.) with prices as of 2026-11-05, https://platform.claude.com/docs/en/about-claude/pricing
+SCHEDULE         MODEL              RUNS  INPUT  OUTPUT  EST.
+(not scheduled)  claude-sonnet-5-5  1     1795   412     $0.01
+total: $0.01 est.
+```
+
+A model with no price says "no price" and gets no dollar figure. To correct a price, put the models you want to change in `~/.heedle/prices.json` (USD per million tokens), or give the worker and `costs` another file with `-prices`:
+
+```bash
+mkdir -p ~/.heedle
+printf '{"models": {"claude-sonnet-5-5": {"input": 2, "output": 10}}}\n' > ~/.heedle/prices.json
+go run ./cmd/loom costs -store ~/heedle-store.git
+```
+
+Give a schedule a monthly budget, in dollars: a run that would start with the month at or over it, estimated, starts nothing, and the schedule is paused saying so. `-resume-next-month` resumes it when a new month starts in its time zone; raising the budget resumes it at once:
+
+```bash
+go run ./cmd/loom schedule -name weekday-digest -cron "0 9 * * 1-5" -tz Europe/Lisbon -budget 5 -resume-next-month '(pipe (echo "weekly digest") echo)'
+go run ./cmd/loom schedules -name weekday-digest -budget 10
+go run ./cmd/loom schedules -delete weekday-digest
+```
+
 ## Troubleshooting
 
 | Symptom | Cause |
