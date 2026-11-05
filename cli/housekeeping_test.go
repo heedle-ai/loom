@@ -67,6 +67,11 @@ func TestInv_HousekeepingCommands(t *testing.T) {
 	if !strings.Contains(out.String(), "agent") || !strings.Contains(out.String(), "loom-a/plan") || !strings.Contains(out.String(), "unknown") || !strings.Contains(out.String(), "n0") {
 		t.Errorf("containers with Temporal down:\n%s", out.String())
 	}
+	// Review 55: only an explicit -store names a home; without one,
+	// nothing is limited to the current directory's (LOOM-523).
+	if strings.Contains(out.String(), "This home is") || strings.Contains(out.String(), "(this)") {
+		t.Errorf("containers without -store took a home:\n%s", out.String())
+	}
 	if d := time.Since(start); d > 20*time.Second {
 		t.Errorf("listing with Temporal down took %v", d)
 	}
