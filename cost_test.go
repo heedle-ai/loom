@@ -351,3 +351,20 @@ func TestInv_ProposalSaysWhatItUsed(t *testing.T) {
 		t.Errorf("usage %+v", p.Usage)
 	}
 }
+
+// TestInv_CostsSayWhatTheyMiss: the wiki says plainly what costs and
+// budgets can't see, since tokens are only what records hold: a run
+// that failed, an attempt retried, a proposal that never checked, a
+// skill Claude wrote, and that a budget can't stop a run already going.
+// (Review 48: failed runs were invisible to budgets, unsaid.)
+func TestInv_CostsSayWhatTheyMiss(t *testing.T) {
+	b, err := os.ReadFile("docs/wiki/How-It-Works.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"A run that fails leaves no record", "a retried attempt", "a proposal that never checked", "a skill Claude writes", "A budget can't stop a run already going"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("How-It-Works doesn't say %q", want)
+		}
+	}
+}

@@ -230,3 +230,70 @@ func TestInv_BudgetPauseIsToldOnce(t *testing.T) {
 		t.Errorf("told twice: %+v", again)
 	}
 }
+
+// TestInv_BudgetsFailClosed: what review 48 found could let a run
+// through, or stop budgets for good. A Haiku 5.5 agent step whose
+// requests together pass 100,000 tokens has no estimate, but a budget
+// counts it at its higher prices: under that bound the schedule runs,
+// over it it's paused as reached, never "can't be checked" for ever. A
+// record that can't be read is a step with no counts, so the month
+// can't be checked and the schedule is paused, and the walk doesn't
+// fail. A schedule's run with no ref is checked on the default ref, as
+// it records there. (Roadmap 10.4, review 48.)
+func TestInv_BudgetsFailClosed(t *testing.T) {
+	nov := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	// 150,000 in and 10,000 out over 9 turns: at most $0.10 (0.075+0.025).
+	haiku := pirn.Answer{Pirn: 1, Model: "claude-haiku-5-5", Text: "x", InputTokens: 150000, OutputTokens: 10000}
+	agentOut := jsonOf(pirn.AgentResult{Answer: haiku, Agent: 1, Turns: 9})
+	run := func(s *warp.Store, sc loom.ScheduleControl, at time.Time) (loom.RunResult, error) {
+		reg := claudeRegistry(t)
+		src := `(agent "tidy")`
+		var suite testsuite.WorkflowTestSuite
+		env := suite.NewTestWorkflowEnvironment()
+		env.SetStartTime(at)
+		loom.RegisterWith(env, &loom.Checker{Registry: reg}, &loom.Recorder{Store: s, Schedules: sc})
+		env.RegisterActivityWithOptions(func(context.Context, plan.Input) (string, error) { return agentOut, nil }, activity.RegisterOptions{Name: pirn.AgentActivityName})
+		env.SetTypedSearchAttributesOnStart(temporal.NewSearchAttributes(temporal.NewSearchAttributeKeyKeyword("TemporalScheduledById").ValueSet(loom.SchedulePrefix + "tidy")))
+		env.ExecuteWorkflow(loom.RunWorkflowName, loom.RunInput{Program: src, Plan: must(loom.Compile(ctx, reg, src)), Ref: ""})
+		var res loom.RunResult
+		err := env.GetWorkflowError()
+		if err == nil {
+			env.GetWorkflowResult(&res)
+		}
+		return res, err
+	}
+	for _, tc := range []struct {
+		budget float64
+		want   string
+	}{{0.11, ""}, {0.10, "paused: monthly budget $0.10 reached (est.) in November 2026"}} {
+		s := newStore(t)
+		sc := &schedules{budget: map[string]loom.ScheduleBudget{"tidy": {Budget: loom.Budget{USD: tc.budget}}}}
+		if res, err := run(s, sc, nov); err != nil || res.Skipped != "" {
+			t.Fatal(res, err)
+		}
+		if res, err := run(s, sc, nov.Add(time.Hour)); err != nil || res.Skipped != tc.want {
+			t.Errorf("$%.2f: %q %v", tc.budget, res.Skipped, err)
+		}
+	}
+	c := loom.Cost(loom.UsageOf(must(loom.Compile(ctx, claudeRegistry(t), `(agent "tidy")`)), map[string]string{"n0": agentOut}), loom.BuiltinPrices())
+	if most, ok := c.AtMost(); c.Complete || c.USD != 0 || !ok || most < 0.1-1e-9 || most > 0.1+1e-9 {
+		t.Errorf("bound: %+v %v %v", c, most, ok)
+	}
+
+	// A record that can't be read.
+	s := newStore(t)
+	empty := must(s.PutTree(ctx, nil))
+	bad := must(s.Commit(ctx, warp.CommitSpec{Tree: empty, Message: "run x", Author: warp.Signature{Name: "loom", Email: "loom@heedle.ai", When: nov},
+		Trailers: []warp.Trailer{{Key: loom.TrailerRun, Value: "r0"}, {Key: loom.TrailerSchedule, Value: "tidy"}}}))
+	if err := s.Advance(ctx, loom.DefaultRef, "", bad); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := loom.RunsBetween(ctx, s, loom.DefaultRef, nov.AddDate(0, 0, -4), nov.Add(time.Hour), "")
+	if err != nil || len(runs) != 1 || len(runs[0].Usage.Missing()) != 1 {
+		t.Fatalf("unreadable record: %+v %v", runs, err)
+	}
+	sc := &schedules{budget: map[string]loom.ScheduleBudget{"tidy": {Budget: loom.Budget{USD: 100}}}}
+	if res, err := run(s, sc, nov.Add(time.Hour)); err != nil || !strings.Contains(res.Skipped, "can't be checked") || !strings.Contains(res.Skipped, "its record can't be read") {
+		t.Errorf("unreadable record: %q %v", res.Skipped, err)
+	}
+}

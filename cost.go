@@ -311,6 +311,12 @@ type Unpriced struct {
 	Model  string `json:"model,omitempty"`
 	Tokens Tokens `json:"tokens"`
 	Why    string `json:"why"`
+	// AtMost bounds what the step can have cost, when that much is
+	// known: a step of several requests of a model priced by prompt
+	// size, priced all at its higher prices. It is never shown as an
+	// estimate; a budget compares against it, so it can only stop a run
+	// early, never let one through (review 48).
+	AtMost *float64 `json:"atMost,omitempty"`
 }
 
 // Costs are dollar estimates of a Usage: USD for the steps that could be
@@ -350,7 +356,8 @@ func Cost(u Usage, prices Prices) Costs {
 		}
 		if m.UpTo > 0 && s.Tokens.Input > m.UpTo {
 			if s.Requests != 1 {
-				c.Unpriced = append(c.Unpriced, Unpriced{Node: s.Node, Model: s.Model, Tokens: s.Tokens,
+				most := (float64(s.Tokens.Input)*m.Above.Input + float64(s.Tokens.Output)*m.Above.Output) / 1e6
+				c.Unpriced = append(c.Unpriced, Unpriced{Node: s.Node, Model: s.Model, Tokens: s.Tokens, AtMost: &most,
 					Why: fmt.Sprintf("%s is priced by each request's prompt, and this step's requests together passed %d input tokens", s.Model, m.UpTo)})
 				continue
 			}
@@ -368,6 +375,20 @@ func Cost(u Usage, prices Prices) Costs {
 	}
 	c.Complete = len(c.Unpriced) == 0
 	return c
+}
+
+// AtMost is an upper bound on what c's usage cost, if one is known: USD
+// plus each unpriced step's AtMost. ok is false if some step has none
+// (a model with no price, or no counts).
+func (c Costs) AtMost() (usd float64, ok bool) {
+	usd = c.USD
+	for _, u := range c.Unpriced {
+		if u.AtMost == nil {
+			return 0, false
+		}
+		usd += *u.AtMost
+	}
+	return usd, true
 }
 
 // RunUsage is one recorded run's usage.
@@ -496,7 +517,13 @@ func RunsBetween(ctx context.Context, s Records, ref string, from, to time.Time,
 			continue
 		}
 		u, ok, err := RecordUsage(ctx, s, c)
-		if err != nil {
+		if errors.Is(err, warp.ErrInvalid) {
+			// A record that can't be read has usage nobody knows: one
+			// step with no counts, so a budget can't be checked and the
+			// pages say so, rather than every page failing (review 48).
+			u, ok = RunUsage{Commit: c.ID, Workflow: u.Workflow, Run: u.Run, Schedule: u.Schedule, At: c.Time,
+				Usage: Usage{Steps: []StepUsage{{Node: "record", Kind: "record", Missing: "its record can't be read: " + err.Error()}}}}, true
+		} else if err != nil {
 			return nil, err
 		}
 		if ok {
