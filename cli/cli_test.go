@@ -651,6 +651,13 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 	if want := "\nact steps can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you\n! act steps can click, type and submit forms on shop.example.org without asking again\n"; !strings.Contains(out.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, out.String())
 	}
+	// Roadmap 9.8: the details they may use, by name.
+	out.Reset()
+	pl.Nodes = append(pl.Nodes, plan.Node{ID: "n2", Activity: pirn.ActActivityName, Args: []string{"x", "https://forms.example.org/", pirn.Uses, "birthdate email"}})
+	printProposal(&out, loom.Proposal{Summary: "Me.", Program: "(act ...)", Plan: &pl})
+	if want := "\nact steps may use your email and date of birth\n"; !strings.Contains(out.String(), want) || strings.Join(loom.ActUses(pl), " ") != "email birthdate" {
+		t.Errorf("missing %q in:\n%s", want, out.String())
+	}
 	out.Reset()
 	echo := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo", Args: []string{"hi"}}}}
 	printProposal(&out, loom.Proposal{Summary: "Hi.", Program: `(echo "hi")`, Plan: &echo})

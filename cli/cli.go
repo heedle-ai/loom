@@ -1082,7 +1082,24 @@ func actDisclosures(p plan.Plan) []string {
 	if len(freely) > 0 {
 		out = append(out, ActDisclosure(freely, true))
 	}
+	if u := loom.ActUses(p); len(u) > 0 {
+		out = append(out, UsesDisclosure(u))
+	}
 	return out
+}
+
+// UsesDisclosure says which of the person's details act steps may use
+// (roadmap 9.8): "may use your name, email address and date of birth".
+func UsesDisclosure(fields []string) string {
+	var words []string
+	for _, f := range fields {
+		words = append(words, pirn.ProfileLabels[f])
+	}
+	list := words[0]
+	if n := len(words); n > 1 {
+		list = strings.Join(words[:n-1], ", ") + " and " + words[n-1]
+	}
+	return "may use your " + list
 }
 
 // ActDisclosure says what act steps may do on hosts: fill in forms and
