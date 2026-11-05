@@ -82,6 +82,9 @@ type Proposal struct {
 	// proposed (CheckReady); nil without a program, or a worker that
 	// doesn't say.
 	Ready *Readiness `json:"ready,omitempty"`
+	// Usage is what proposing used of Claude: one step per attempt
+	// (roadmap 10.4).
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // Readiness is whether a plan can run now: each connector its steps ask
@@ -331,16 +334,20 @@ func (w Writer) Ask(ctx context.Context, in AskRequest) (Proposal, error) {
 		" (a conversation so far, if any, is a source: this request may refine it).\n\nToday is " + today + ", in the time zone " + zone +
 		".\n\nThe request:\n\n" + strings.TrimSpace(in.Request) + "\n\n" + AskFormat
 	var last string
+	var answers []pirn.Answer
 	for attempt := 1; attempt <= MaxAskAttempts; attempt++ {
 		a, err := w.Asker.Ask(ctx, pirn.Question{Instruction: instruction, Sources: sources})
 		if err != nil {
 			return Proposal{}, err
 		}
+		answers = append(answers, a)
 		ans, err := parseAnswer(a.Text)
 		if err == nil {
 			var p Proposal
 			if p, err = propose(ctx, reg, ans, zone); err == nil {
 				p.Attempts = attempt
+				u := ProposalUsage(answers)
+				p.Usage = &u
 				if p.Plan != nil && w.Ready != nil {
 					r, err := w.Ready(ctx, *p.Plan)
 					if err != nil {
