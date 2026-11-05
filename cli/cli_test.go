@@ -629,14 +629,21 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 }
 
 // TestInv_AskDisclosesActHosts: before a proposal with act steps runs,
-// heedle ask says they can click, type and submit forms on their hosts
-// without asking again; a proposal without one says nothing of the kind.
-// (Roadmap 9.5.)
+// heedle ask says what they may do on their hosts: click and type, and
+// stop before sending to ask you (roadmap 9.7), or, for a step its
+// program lets send without asking, submit forms without asking again;
+// a proposal without one says nothing of the kind. (Roadmap 9.5.)
 func TestInv_AskDisclosesActHosts(t *testing.T) {
 	pl := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: pirn.ActActivityName, Args: []string{"sign up", "https://forms.example.org/", "cdn.example.org"}}}}
 	var out bytes.Buffer
 	printProposal(&out, loom.Proposal{Summary: "I'll sign you up.", Program: `(act "sign up" "https://forms.example.org/" "cdn.example.org")`, Plan: &pl})
-	if want := "can click, type and submit forms on cdn.example.org, forms.example.org without asking again"; !strings.Contains(out.String(), want) {
+	if want := "act steps can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you"; !strings.Contains(out.String(), want) || strings.Contains(out.String(), "without asking") {
+		t.Errorf("missing %q in:\n%s", want, out.String())
+	}
+	out.Reset()
+	pl.Nodes = append(pl.Nodes, plan.Node{ID: "n1", Activity: pirn.ActActivityName, Args: []string{"pay", "https://shop.example.org/", pirn.SendFreely}})
+	printProposal(&out, loom.Proposal{Summary: "Both.", Program: `(par (act "sign up" "https://forms.example.org/" "cdn.example.org") (act "pay" "https://shop.example.org/" :send-without-asking))`, Plan: &pl})
+	if want := "act steps can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you; can click, type and submit forms on shop.example.org without asking again"; !strings.Contains(out.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, out.String())
 	}
 	out.Reset()
@@ -655,7 +662,7 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 func TestInv_ActNeedsAllowAct(t *testing.T) {
 	ctx := context.Background()
 	prog := `(act "Join as Ada" "https://forms.example.org/" "cdn.example.org")`
-	want := "can click, type and submit forms on cdn.example.org, forms.example.org without asking again: give -allow-act"
+	want := "can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you: give -allow-act"
 	for _, args := range [][]string{
 		{"run", "-address", "127.0.0.1:1", prog},
 		{"schedule", "-name", "s", "-every", "24h", "-address", "127.0.0.1:1", prog},
