@@ -356,7 +356,10 @@ func Cost(u Usage, prices Prices) Costs {
 		}
 		if m.UpTo > 0 && s.Tokens.Input > m.UpTo {
 			if s.Requests != 1 {
-				most := (float64(s.Tokens.Input)*m.Above.Input + float64(s.Tokens.Output)*m.Above.Output) / 1e6
+				// Each request was at one price or the other, so the higher
+				// of the two bounds it, whichever your prices file made
+				// higher (review 48).
+				most := (float64(s.Tokens.Input)*math.Max(m.Input, m.Above.Input) + float64(s.Tokens.Output)*math.Max(m.Output, m.Above.Output)) / 1e6
 				c.Unpriced = append(c.Unpriced, Unpriced{Node: s.Node, Model: s.Model, Tokens: s.Tokens, AtMost: &most,
 					Why: fmt.Sprintf("%s is priced by each request's prompt, and this step's requests together passed %d input tokens", s.Model, m.UpTo)})
 				continue
@@ -494,9 +497,14 @@ const recordSlack = 24 * time.Hour
 var ErrTooManyRuns = errors.New("loom: too many records to add up")
 
 // RunsBetween is the usage of every run recorded on ref at or after from
-// and before to, newest first, reading back along first parents. If
-// schedule isn't empty, only that schedule's runs (TrailerSchedule).
-func RunsBetween(ctx context.Context, s Records, ref string, from, to time.Time, schedule string) ([]RunUsage, error) {
+// and before to, newest first, reading back along first parents. Given
+// schedules, only those schedules' runs (TrailerSchedule), and no other
+// run's outputs are read.
+func RunsBetween(ctx context.Context, s Records, ref string, from, to time.Time, schedules ...string) ([]RunUsage, error) {
+	only := map[string]bool{}
+	for _, n := range schedules {
+		only[n] = true
+	}
 	head, ok, err := s.Resolve(ctx, ref)
 	if err != nil || !ok {
 		return nil, err
@@ -513,7 +521,7 @@ func RunsBetween(ctx context.Context, s Records, ref string, from, to time.Time,
 		if i == MaxCostWalk-1 {
 			return nil, fmt.Errorf("%w: more than %d on %s since %s", ErrTooManyRuns, MaxCostWalk, ref, from.Format(time.DateOnly))
 		}
-		if c.Time.Before(from) || !c.Time.Before(to) || (schedule != "" && trailer(c.Trailers, TrailerSchedule) != schedule) {
+		if c.Time.Before(from) || !c.Time.Before(to) || (len(only) > 0 && !only[trailer(c.Trailers, TrailerSchedule)]) {
 			continue
 		}
 		u, ok, err := RecordUsage(ctx, s, c)
@@ -563,7 +571,7 @@ func AllRunsBetween(ctx context.Context, s Records, from, to time.Time) ([]RunUs
 		if strings.HasPrefix(r.Name, "refs/treadle/") {
 			continue
 		}
-		runs, err := RunsBetween(ctx, s, r.Name, from, to, "")
+		runs, err := RunsBetween(ctx, s, r.Name, from, to)
 		if err != nil {
 			return nil, err
 		}
