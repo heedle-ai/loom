@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 
@@ -15,11 +16,11 @@ import (
 	"github.com/heedle-ai/reed"
 )
 
-// lawRegistry has echo, ask and agent: every kind of step whose needs
+// lawRegistry has echo, ask, agent, browse and act: every kind of step whose needs
 // differ, with no skill library.
 func lawRegistry(t *testing.T) *registry.Registry {
 	reg := draft.DefaultRegistry()
-	for _, s := range []registry.BuiltinSpec{pirn.BuiltinSpec(), pirn.AgentBuiltinSpec(), reed.BuiltinSpec()} {
+	for _, s := range []registry.BuiltinSpec{pirn.BuiltinSpec(), pirn.AgentBuiltinSpec(), reed.BuiltinSpec(), pirn.ActBuiltinSpec()} {
 		if err := reg.Register(s); err != nil {
 			t.Fatal(err)
 		}
@@ -33,7 +34,14 @@ func lawRegistry(t *testing.T) *registry.Registry {
 func randomProgram(r *rand.Rand, depth int) string {
 	grants := []string{`"maps"`, `"maps/directions"`, `"maps/search_places"`, `"search"`, `"mail/send"`, `"mail/read"`}
 	if depth == 0 || r.Intn(3) == 0 {
-		switch r.Intn(4) {
+		switch r.Intn(5) {
+		case 4:
+			// act: Claude, a browser-agent image and the hosts it discloses
+			// (roadmap 9.5).
+			if r.Intn(2) == 0 {
+				return fmt.Sprintf(`(act "f%d" "https://form%d.example.org/")`, r.Intn(9), r.Intn(4))
+			}
+			return fmt.Sprintf(`(act "f%d" "https://form%d.example.org/" "cdn%d.example.org")`, r.Intn(9), r.Intn(4), r.Intn(4))
 		case 0:
 			return fmt.Sprintf(`(echo "e%d")`, r.Intn(9))
 		case 3:
@@ -79,11 +87,21 @@ func needsUnion(a, b loom.Requirements) loom.Requirements {
 			}
 		}
 	}
-	return loom.Requirements{Grant: g, Claude: a.Claude || b.Claude, Agent: a.Agent || b.Agent, Browser: a.Browser || b.Browser}
+	hosts := map[string]bool{}
+	for _, h := range append(append([]string(nil), a.ActHosts...), b.ActHosts...) {
+		hosts[h] = true
+	}
+	var hs []string
+	for h := range hosts {
+		hs = append(hs, h)
+	}
+	sort.Strings(hs)
+	return loom.Requirements{Grant: g, Claude: a.Claude || b.Claude, Agent: a.Agent || b.Agent, Browser: a.Browser || b.Browser,
+		BrowserAgent: a.BrowserAgent || b.BrowserAgent, ActHosts: hs}
 }
 
 func needsString(r loom.Requirements) string {
-	return fmt.Sprintf("%s claude=%v agent=%v browser=%v", r.Grant, r.Claude, r.Agent, r.Browser)
+	return fmt.Sprintf("%s claude=%v agent=%v browser=%v browserAgent=%v act=%v", r.Grant, r.Claude, r.Agent, r.Browser, r.BrowserAgent, r.ActHosts)
 }
 
 // TestLaw_NeedsIsAHomomorphism: what a program needs is a homomorphism
@@ -91,7 +109,9 @@ func needsString(r loom.Requirements) string {
 // needs(f ⊗ g), and a step that needs nothing (echo) is the unit. Needs
 // form a join-semilattice under ∪ (commutative, associative,
 // idempotent), so a program's needs don't depend on how it's bracketed
-// or ordered, only on its steps. Checked on 300 random programs.
+// or ordered, only on its steps. Act steps are among them: their
+// browser-agent image and the hosts they disclose join like the rest
+// (roadmap 9.5). Checked on 300 random programs.
 // (Soundness law 16; roadmap 8.2.)
 func TestLaw_NeedsIsAHomomorphism(t *testing.T) {
 	reg := lawRegistry(t)
@@ -109,7 +129,7 @@ func TestLaw_NeedsIsAHomomorphism(t *testing.T) {
 		return n
 	}
 	unit := needs(`(echo "unit")`)
-	if len(unit.Grant) != 0 || unit.Claude || unit.Agent || unit.Browser {
+	if len(unit.Grant) != 0 || unit.Claude || unit.Agent || unit.Browser || unit.BrowserAgent || len(unit.ActHosts) != 0 {
 		t.Fatalf("echo needs %s", needsString(unit))
 	}
 	for i := 0; i < 300; i++ {
@@ -142,8 +162,8 @@ func TestLaw_NeedsIsAHomomorphism(t *testing.T) {
 // can: ready(f ; g) = ready(f) ∧ ready(g) = ready(f ⊗ g), with the
 // worker fixed. So the front door's verdict on a whole proposal is the
 // conjunction of the verdicts on its steps, and adding a step never makes
-// a plan readier. Checked on 300 random programs against three workers.
-// (Soundness law 17; roadmap 8.2.)
+// a plan readier. Checked on 300 random programs against four workers.
+// (Soundness law 17; roadmap 8.2; act steps since roadmap 9.5.)
 func TestLaw_ReadyIsAMeet(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	reg := lawRegistry(t)
@@ -154,9 +174,10 @@ func TestLaw_ReadyIsAMeet(t *testing.T) {
 		{Name: "mail", URL: "https://mail.example/mcp", Writes: []string{"send"}, Approve: true},
 	}
 	workers := []loom.Worker{
-		{Connectors: all, Keys: memVault{"ANTHROPIC_API_KEY": "k", "LAW_SEARCH_KEY": "s"}, Agents: true, Browsers: true},
-		{Connectors: all[:2], Keys: memVault{"ANTHROPIC_API_KEY": "k"}, Agents: true}, // no mail, no search key
-		{Connectors: all, Keys: memVault{"LAW_SEARCH_KEY": "s"}, Agents: false},       // no Claude, no agent image
+		{Connectors: all, Keys: memVault{"ANTHROPIC_API_KEY": "k", "LAW_SEARCH_KEY": "s"}, Agents: true, Browsers: true, BrowserAgents: true},
+		{Connectors: all, Keys: memVault{"ANTHROPIC_API_KEY": "k", "LAW_SEARCH_KEY": "s"}, Agents: true, Browsers: true}, // no browser-agent image
+		{Connectors: all[:2], Keys: memVault{"ANTHROPIC_API_KEY": "k"}, Agents: true},                                    // no mail, no search key
+		{Connectors: all, Keys: memVault{"LAW_SEARCH_KEY": "s"}, Agents: false},                                          // no Claude, no agent image
 	}
 	ready := func(src string, w loom.Worker) bool {
 		t.Helper()

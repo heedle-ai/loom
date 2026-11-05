@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -92,8 +93,9 @@ type Readiness struct {
 	Needs        []pirn.Need `json:"needs"`
 	Claude       string      `json:"claude,omitempty"`
 	ClaudeDetail string      `json:"claudeDetail,omitempty"`
-	Agent        string      `json:"agent,omitempty"`   // why agent and skill steps can't run here
-	Browser      string      `json:"browser,omitempty"` // why browse steps can't run here
+	Agent        string      `json:"agent,omitempty"`        // why agent and skill steps can't run here
+	Browser      string      `json:"browser,omitempty"`      // why browse steps can't run here
+	BrowserAgent string      `json:"browserAgent,omitempty"` // why act steps can't run here
 	Error        string      `json:"error,omitempty"`
 	Ready        bool        `json:"ready"`
 }
@@ -106,6 +108,8 @@ type Worker struct {
 	Keys       pirn.Vault
 	Agents     bool
 	Browsers   bool // has a browser image for browse steps
+	// BrowserAgents: has a browser-agent image for act steps (roadmap 9.5).
+	BrowserAgents bool
 }
 
 // CheckReady is whether p can run now on worker w with lib: each
@@ -132,7 +136,10 @@ func CheckReady(ctx context.Context, p plan.Plan, lib SkillGrants, w Worker) (Re
 		// Review 35: a browse step failed at once on a fresh install.
 		r.Browser = "this worker has no browser image, so it can't run browse steps: give heedle up -- -browser-image ID"
 	}
-	r.Ready = r.Claude == "" && r.Agent == "" && r.Browser == ""
+	if req.BrowserAgent && !w.BrowserAgents {
+		r.BrowserAgent = "this worker has no browser-agent image, so it can't run act steps: give heedle up -- -browser-agent-image ID"
+	}
+	r.Ready = r.Claude == "" && r.Agent == "" && r.Browser == "" && r.BrowserAgent == ""
 	for _, n := range r.Needs {
 		r.Ready = r.Ready && n.Problem == ""
 	}
@@ -159,7 +166,7 @@ const AskFormat = `Reply with only one JSON object, in a ` + "```json" + ` block
 - "timeZone": the IANA time zone for "cron" (the person's own, unless they name another); else "".
 - "name": when it repeats, a short name for the schedule: lower-case letters, digits and hyphens, such as "lisbon-weekly"; else "".
 - "skill": only when "program" is "": what a new skill would do, its arguments, and the connectors it would need, in a few sentences; else "".
-Prefer a skill that fits over general commands. Fill a skill's or command's arguments from the request; write dates as YYYY-MM-DD, worked out from today.`
+Prefer a skill that fits over general commands. act submits forms on the hosts it names without asking again, so use it only when the request asks for a form to be filled in or sent; when the site needs the person to sign in, act can't, so say that in "summary". Fill a skill's or command's arguments from the request; write dates as YYYY-MM-DD, worked out from today.`
 
 var jsonFence = regexp.MustCompile("(?s)```(?:json)?\\s*\\n(.*?)```")
 
@@ -423,6 +430,11 @@ type Requirements struct {
 	Agent  bool
 	// Browser: a browse step, which runs a browser in a container.
 	Browser bool
+	// BrowserAgent: an act step, which runs Claude over a browser in a
+	// container (roadmap 9.5); ActHosts are the hosts act steps may click,
+	// type and submit forms on, sorted, each once.
+	BrowserAgent bool
+	ActHosts     []string
 }
 
 // Needs is what p's steps need. A skill version its step would refuse
@@ -465,6 +477,9 @@ func Needs(ctx context.Context, p plan.Plan, lib SkillGrants) (Requirements, err
 			}
 		case reed.ActivityName:
 			r.Browser = true
+		case pirn.ActActivityName:
+			r.Claude, r.BrowserAgent = true, true
+			r.ActHosts = unionHosts(r.ActHosts, ActHosts(plan.Plan{Nodes: []plan.Node{n}}))
 		case treadle.ActivityName:
 			r.Claude, r.Agent = true, true
 			if lib == nil || len(n.Args) < 2 {
@@ -478,4 +493,38 @@ func Needs(ctx context.Context, p plan.Plan, lib SkillGrants) (Requirements, err
 		}
 	}
 	return r, nil
+}
+
+// ActHosts are the hosts p's act steps may click, type and submit forms
+// on, without asking again: each step's start page's host and further
+// hosts, as reed's allowlist reads them (pirn.ActHosts), sorted, each
+// once. A front door discloses them before a run (roadmap 9.5).
+func ActHosts(p plan.Plan) []string {
+	var out []string
+	for _, n := range p.Nodes {
+		if n.Activity != pirn.ActActivityName {
+			continue
+		}
+		if h, ok := pirn.ActHosts(n.Args); ok {
+			out = unionHosts(out, h)
+		}
+	}
+	return out
+}
+
+// unionHosts is a ∪ b, sorted.
+func unionHosts(a, b []string) []string {
+	set := map[string]bool{}
+	for _, h := range append(append([]string(nil), a...), b...) {
+		set[h] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for h := range set {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
 }

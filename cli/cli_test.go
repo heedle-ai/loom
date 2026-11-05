@@ -171,7 +171,7 @@ func TestSkillsCommand(t *testing.T) {
 func TestWorkerCommandsAreTheRegistry(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	reg, err := workerCommands(env, pirn.Claude{}, pirn.Agent{}, reed.Browser{}, nil)
+	reg, err := workerCommands(env, pirn.Claude{}, pirn.Agent{}, pirn.Act{}, reed.Browser{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,8 +402,8 @@ func TestInv_WritesCommand(t *testing.T) {
 // TestInv_WriterSeesEveryCommand: loom write and loom skills -create ask
 // Claude, so they need a key (and -create an agent image) and say so; the
 // writer is told about every command the worker has, built-in ones as
-// loom.BuiltinCommands describes them and each skill by its own
-// description.
+// loom.BuiltinCommands describes them (act among them, saying it can't
+// sign in) and each skill by its own description.
 func TestInv_WriterSeesEveryCommand(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	var out bytes.Buffer
@@ -432,6 +432,10 @@ func TestInv_WriterSeesEveryCommand(t *testing.T) {
 		if about[name] == "" || about[name] == "A command this worker has." {
 			t.Errorf("the writer isn't told what %s does", name)
 		}
+	}
+	// Roadmap 9.5: the worker has act, and the writer is told about it.
+	if !strings.Contains(about["act"], "can't sign in") {
+		t.Errorf("act: %q", about["act"])
 	}
 	if about["triage"] != "A skill: Triages bugs by severity." {
 		t.Errorf("triage: %q", about["triage"])
@@ -585,14 +589,14 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 	pl := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Skill", Args: []string{"trip", "v"}}}}
 	p := loom.Proposal{Summary: "I'll plan Lisbon.", Program: "(trip \"Lisbon\")\n", Plan: &pl,
 		Schedule: &loom.ScheduleSpec{Every: 168 * time.Hour}, Name: "lisbon-weekly",
-		Ready: &loom.Readiness{Claude: "key", Agent: "no agent image", Browser: "no browser image", Needs: []pirn.Need{{Connector: "maps", Problem: "absent"}, {Connector: "mail", Tools: []string{"send"}, Problem: "key", Key: "MAIL_KEY", Writes: []string{"send"}, Approve: true}, {Connector: "search"}, {Connector: "slack", Writes: []string{"post"}}}}}
+		Ready: &loom.Readiness{Claude: "key", Agent: "no agent image", Browser: "no browser image", BrowserAgent: "no browser-agent image", Needs: []pirn.Need{{Connector: "maps", Problem: "absent"}, {Connector: "mail", Tools: []string{"send"}, Problem: "key", Key: "MAIL_KEY", Writes: []string{"send"}, Approve: true}, {Connector: "search"}, {Connector: "slack", Writes: []string{"post"}}}}}
 	var out bytes.Buffer
 	printProposal(&out, p)
 	for _, want := range []string{"I'll plan Lisbon.", "(trip \"Lisbon\")", "schedule lisbon-weekly: every 168h",
 		"missing  Claude: no ANTHROPIC_API_KEY; set it with: heedle secret set ANTHROPIC_API_KEY",
 		"missing  maps: no connector of that name; add one on the Connectors page, named maps",
 		"missing  mail (send), which can change things: send (each waits for your approval): its key MAIL_KEY isn't set; set it with: heedle secret set MAIL_KEY", "ready    search",
-		"missing  agent steps: no agent image", "missing  browse steps: no browser image", "ready    slack, which can change things: post (without asking you)"} {
+		"missing  agent steps: no agent image", "missing  browse steps: no browser image", "missing  act steps: no browser-agent image", "ready    slack, which can change things: post (without asking you)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
 		}
@@ -621,5 +625,24 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 	}
 	if err := run(ctx, []string{"ask", "-then", "go", "x"}, io.Discard); err == nil {
 		t.Error("-then go")
+	}
+}
+
+// TestInv_AskDisclosesActHosts: before a proposal with act steps runs,
+// heedle ask says they can click, type and submit forms on their hosts
+// without asking again; a proposal without one says nothing of the kind.
+// (Roadmap 9.5.)
+func TestInv_AskDisclosesActHosts(t *testing.T) {
+	pl := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: pirn.ActActivityName, Args: []string{"sign up", "https://forms.example.org/", "cdn.example.org"}}}}
+	var out bytes.Buffer
+	printProposal(&out, loom.Proposal{Summary: "I'll sign you up.", Program: `(act "sign up" "https://forms.example.org/" "cdn.example.org")`, Plan: &pl})
+	if want := "can click, type and submit forms on cdn.example.org, forms.example.org without asking again"; !strings.Contains(out.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, out.String())
+	}
+	out.Reset()
+	echo := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo", Args: []string{"hi"}}}}
+	printProposal(&out, loom.Proposal{Summary: "Hi.", Program: `(echo "hi")`, Plan: &echo})
+	if strings.Contains(out.String(), "submit forms") {
+		t.Errorf("disclosed without an act step:\n%s", out.String())
 	}
 }
