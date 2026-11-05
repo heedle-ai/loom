@@ -130,7 +130,7 @@ The `Shuttle-Workflow` value is what you search for in Temporal's Web UI to see 
 
 ## 6. What heedle remembers
 
-The front door (`loom ask`, or **Ask heedle** in drawdown) sends Claude what you've asked heedle to remember about you with every request, and the proposal says which ([How It Works → Memory you can see](How-It-Works#the-front-door-ask)). A worker reads it from `-memory FILE`; heedle up's is `~/.heedle/memory.json`, which `loom memory` uses unless you give `-memory FILE`:
+The front door (`loom ask`, or **Ask heedle** in drawdown) sends Claude what you've asked heedle to remember about you with every request, and the proposal says which ([How It Works → Memory you can see](How-It-Works#the-front-door-ask)). A worker reads it from `-memory FILE`; heedle up's is `~/.heedle/memory.json` (or `DIR/memory.json` with `heedle up -home DIR`), which `loom memory` uses unless you give `-memory FILE`:
 
 ```bash
 loom memory -add "Vegetarian."
