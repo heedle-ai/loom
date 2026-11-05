@@ -113,6 +113,11 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		return RunResult{}, err
 	}
 
+	// Decisions on the forms its act steps wait to send (roadmap 9.7).
+	if err := formDecisions(ctx); err != nil {
+		return RunResult{}, err
+	}
+
 	child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: info.WorkflowExecution.ID + "/plan",
 	})
