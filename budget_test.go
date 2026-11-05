@@ -265,7 +265,7 @@ func TestInv_BudgetsFailClosed(t *testing.T) {
 	for _, tc := range []struct {
 		budget float64
 		want   string
-	}{{0.11, ""}, {0.10, "paused: monthly budget $0.10 reached (est.) in November 2026"}} {
+	}{{0.11, ""}, {0.10, "paused: monthly budget $0.10 reached (at most $0.10, est.) in November 2026"}} {
 		s := newStore(t)
 		sc := &schedules{budget: map[string]loom.ScheduleBudget{"tidy": {Budget: loom.Budget{USD: tc.budget}}}}
 		if res, err := run(s, sc, nov); err != nil || res.Skipped != "" {
@@ -280,6 +280,18 @@ func TestInv_BudgetsFailClosed(t *testing.T) {
 		t.Errorf("bound: %+v %v %v", c, most, ok)
 	}
 
+	if _, ok := loom.BudgetPaused("paused: monthly budget $0.10 reached (at most $0.10, est.) in November 2026"); !ok {
+		t.Error("a bound's note isn't read as a budget's")
+	}
+	// Your prices with the tiers the wrong way round: the bound is still
+	// one, each part at the higher of the two prices (review 48 round 2).
+	backwards := loom.BuiltinPrices()
+	backwards.Models["claude-haiku-5-5"] = loom.Price{Input: 1, Output: 5, UpTo: 100000, Above: &loom.Price{Input: 0.1, Output: 0.5}}
+	cb := loom.Cost(loom.UsageOf(must(loom.Compile(ctx, claudeRegistry(t), `(agent "tidy")`)), map[string]string{"n0": agentOut}), backwards)
+	if most, ok := cb.AtMost(); !ok || most < 0.2-1e-9 {
+		t.Errorf("bound with backwards tiers: %v %v", most, ok)
+	}
+
 	// A record that can't be read.
 	s := newStore(t)
 	empty := must(s.PutTree(ctx, nil))
@@ -288,7 +300,7 @@ func TestInv_BudgetsFailClosed(t *testing.T) {
 	if err := s.Advance(ctx, loom.DefaultRef, "", bad); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := loom.RunsBetween(ctx, s, loom.DefaultRef, nov.AddDate(0, 0, -4), nov.Add(time.Hour), "")
+	runs, err := loom.RunsBetween(ctx, s, loom.DefaultRef, nov.AddDate(0, 0, -4), nov.Add(time.Hour))
 	if err != nil || len(runs) != 1 || len(runs[0].Usage.Missing()) != 1 {
 		t.Fatalf("unreadable record: %+v %v", runs, err)
 	}
@@ -296,4 +308,25 @@ func TestInv_BudgetsFailClosed(t *testing.T) {
 	if res, err := run(s, sc, nov.Add(time.Hour)); err != nil || !strings.Contains(res.Skipped, "can't be checked") || !strings.Contains(res.Skipped, "its record can't be read") {
 		t.Errorf("unreadable record: %q %v", res.Skipped, err)
 	}
+}
+
+// TestInv_ResumeBudgetsEveryLooks: the worker's loop looks for schedules
+// to resume at once and then every interval, until its context ends.
+// (Review 48 round 2: only the source was checked.)
+func TestInv_ResumeBudgetsEveryLooks(t *testing.T) {
+	c := &mocks.Client{}
+	sc := &mocks.ScheduleClient{}
+	it := &mocks.ScheduleListIterator{}
+	it.On("HasNext").Return(false)
+	var mu sync.Mutex
+	looks := 0
+	sc.On("List", mock.Anything, mock.Anything).Run(func(mock.Arguments) { mu.Lock(); looks++; mu.Unlock() }).Return(it, nil)
+	c.On("ScheduleClient").Return(sc)
+	cx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+	defer cancel()
+	loom.ResumeBudgetsEvery(cx, c, "loom", 100*time.Millisecond, t.Logf)
+	if mu.Lock(); looks < 3 {
+		t.Errorf("looked %d times", looks)
+	}
+	mu.Unlock()
 }
