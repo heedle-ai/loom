@@ -731,9 +731,43 @@ func TestInv_MemoryCommand(t *testing.T) {
 	if b, _ := os.ReadFile(other); !strings.Contains(string(b), "Aisle seats.") {
 		t.Errorf("-memory FILE: %s", b)
 	}
-	for _, bad := range [][]string{{"-add", "x", "-forget-all"}, {"-forget", "m000000000000"}, {"stray"}} {
+	// A memory edited by hand into a secret: listed, with why, and
+	// forgettable (review 47).
+	call("-memory", other, "-add", "Window seat.")
+	b, _ = os.ReadFile(other)
+	os.WriteFile(other, []byte(strings.Replace(string(b), "Window seat.", "my password is hunter2", 1)), 0o600)
+	if err := call("-memory", other); err != nil || !strings.Contains(out.String(), "can't go to Claude: that looks like a password") {
+		t.Errorf("a hand-edited secret: %v %s", err, out.String())
+	}
+	os.WriteFile(other, []byte("{"), 0o600)
+	if err := call("-memory", other); err == nil || !strings.Contains(err.Error(), "-forget-all") {
+		t.Errorf("an unreadable file: %v", err)
+	}
+	if err := call("-memory", other, "-forget-all"); err != nil {
+		t.Errorf("forget-all of an unreadable file: %v", err)
+	}
+	for _, bad := range [][]string{{"-add", "x", "-forget-all"}, {"-forget", "m000000000000"}, {"stray"}, {"-add", ""}, {"-add", "  "}} {
 		if err := call(bad...); err == nil {
 			t.Errorf("%q: no error", bad)
 		}
+	}
+}
+
+// TestInv_AskSaysWhatMemoryDid: loom ask says how many memories went with
+// the request, and each thing heedle could remember, with the command
+// that remembers it; nothing is remembered. A proposal only to remember
+// something prints no program. (Review 47: the terminal said neither.)
+func TestInv_AskSaysWhatMemoryDid(t *testing.T) {
+	var out bytes.Buffer
+	printProposal(&out, loom.Proposal{Summary: "Porto, vegetarian.", Program: "(echo \"porto\")\n", Memory: []string{"m0123456789ab", "m0123456789ac"}, Remember: []string{"No fish, ever."}})
+	got := out.String()
+	if !strings.Contains(got, "Used 2 things heedle remembers") || !strings.Contains(got, "heedle could remember: No fish, ever.") ||
+		!strings.Contains(got, "heedle memory -add 'No fish, ever.'") || !strings.Contains(got, "(echo \"porto\")") {
+		t.Errorf("%s", got)
+	}
+	out.Reset()
+	printProposal(&out, loom.Proposal{Summary: "heedle could remember that you're vegetarian.", Remember: []string{"Vegetarian."}})
+	if got := out.String(); strings.Count(got, "\n\n") != 1 || !strings.Contains(got, "heedle memory -add") {
+		t.Errorf("only to remember: %q", got)
 	}
 }
