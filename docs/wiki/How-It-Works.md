@@ -102,6 +102,22 @@ go run ./cmd/loom schedules -delete weekday-digest
 
 `schedules` lists each with when it runs, whether it's paused and why, its next run and how many recent runs Temporal keeps for it; `-run` starts one now, and `-delete` removes the schedule (its runs' records stay). Temporal's test environment has no schedules, so heedle's end-to-end test makes, runs and deletes one on a real Temporal server.
 
+## Housekeeping: containers, images and stopping a run
+
+Every container a run starts carries heedle's labels (roadmap 9.2, [bobbin → heedle's labels](https://github.com/heedle-ai/bobbin/wiki/How-It-Works#heedles-labels-and-tidying-up)). The worker registers every command through `Labelled`, so each step's activity runs with its run labels: the workflow that scheduled it and that workflow's run, from Temporal's activity info, and the step's node ID. A skill's step, which treadle runs, is labelled the same way. Commands name the kind of container they start.
+
+```bash
+go run ./cmd/loom containers
+go run ./cmd/loom images
+```
+
+`containers` lists heedle's containers: their kind, the run each belongs to and its status, the step, age, image, CPU and memory (`Containers`). A step's labels name the plan workflow that ran it (`<run>/plan`). Temporal says which run started that plan, so the listing shows the run you'd cancel. Each workflow is asked about once. Without Temporal the list still shows, with each run's status `unknown`.
+
+- `containers -stop WORKFLOW`, or `cancel WORKFLOW [RUN]`, stops a run through Temporal (`Cancel`). Temporal tells its running steps through their heartbeats, so they end, and Podman removes their containers (`--rm`). The run ends **canceled**, with no record, as a run that fails has none. Only a run is cancelled. Anything else, such as a merge or a plan's own workflow, is refused, and a run that has already ended is left as it is: `cancel` says how it ended. A container is never killed directly.
+- `containers -clean` removes the containers of runs that have ended (`Clean`): those whose workflow Temporal says has closed. It leaves a running run's container, one Temporal doesn't know (another Temporal's, perhaps) and one with no run label. Without Temporal it removes nothing.
+
+`images` lists the images named under `ghcr.io/heedle-ai/`, with their sizes, how many containers use each, and which are kept. `images -keep REF ... -prune` removes the old ones: the names of images that aren't kept and that no container uses (`bobbin.PruneImages`). It refuses to prune without `-keep`, so it can't remove the release's own images. `heedle images` gives it the images the current heedle release pins. Your own images, and your own names on heedle's, are never touched.
+
 ## Changing skills
 
 A worker's skills ([treadle](https://github.com/heedle-ai/treadle/wiki)) change in two ways: `loom skills` on the worker's store, or `SkillsWorkflow` (`loom.ChangeSkills`), which runs one `LoomSkillsChange` activity on a worker. drawdown uses the workflow, since it never writes to the store itself. A change is one of:

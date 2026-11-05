@@ -3,7 +3,14 @@ package loom_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/heedle-ai/bobbin"
+	"github.com/heedle-ai/shuttle"
+	"github.com/heedle-ai/shuttle/plan"
+	"go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/temporal"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +39,9 @@ func TestE2E_ARealServer(t *testing.T) {
 	}
 	c0, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	srv, err := testsuite.StartDevServer(c0, testsuite.DevServerOptions{LogLevel: "error"})
+	opts := testsuite.DevServerOptions{LogLevel: "error"}
+	opts.ExistingPath, _ = exec.LookPath("temporal") // else StartDevServer downloads it
+	srv, err := testsuite.StartDevServer(c0, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,5 +112,75 @@ func TestE2E_ARealServer(t *testing.T) {
 	sk, err := loom.ChangeSkills(c0, c, queue, loom.SkillsChange{Op: loom.SkillsCreate, Description: "Triages bugs."})
 	if err != nil || !sk.Pending || sk.Name != "triage" {
 		t.Fatalf("created: %+v %v", sk, err)
+	}
+}
+
+// TestE2E_CancelStopsTheStep: on a real Temporal server, cancelling a run
+// (loom.Cancel, as heedle containers -stop and the Run page do) tells its
+// running step, through its heartbeat, so the step ends (and Podman would
+// remove its container); the run ends canceled, with no record (LOOM-501).
+// It uses the temporal CLI on the PATH if there is one. CI's e2e job runs
+// it with LOOM_E2E=1; elsewhere it is skipped.
+func TestE2E_CancelStopsTheStep(t *testing.T) {
+	if os.Getenv("LOOM_E2E") != "1" {
+		t.Skip("set LOOM_E2E=1 to run against a real Temporal server")
+	}
+	c0, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	opts := testsuite.DevServerOptions{LogLevel: "error"}
+	opts.ExistingPath, _ = exec.LookPath("temporal")
+	srv, err := testsuite.StartDevServer(c0, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	c := srv.Client()
+	const queue = "e2e-cancel"
+	reg := draft.DefaultRegistry()
+	reg.MustRegister(waitSpec)
+	s := newStore(t)
+	w := worker.New(c, queue, worker.Options{})
+	loom.Register(w, s, reg)
+	started, told := make(chan bobbin.Labels, 1), make(chan struct{})
+	loom.Labelled(w).RegisterActivityWithOptions(shuttle.ArrowAsActivity(func(ctx context.Context, in plan.Input) (string, error) {
+		started <- bobbin.LabelsFrom(ctx)
+		for {
+			activity.RecordHeartbeat(ctx)
+			select {
+			case <-ctx.Done():
+				close(told)
+				return "", ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}), activity.RegisterOptions{Name: "Wait"})
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	r, err := loom.Submit(c0, c, queue, loom.RunInput{Program: "(wait)", Plan: must(loom.Compile(c0, reg, "(wait)"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := <-started
+	if !strings.HasPrefix(l.Workflow, r.GetID()+"/plan") || l.Run == "" || l.Step == "" {
+		t.Errorf("the step's labels %+v, for run %s", l, r.GetID())
+	}
+	if _, err := loom.Cancel(c0, c, r.GetID(), ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-told:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the running step wasn't told its run was cancelled")
+	}
+	if err := r.Get(c0, nil); !temporal.IsCanceledError(err) {
+		t.Errorf("a cancelled run ended with %v", err)
+	}
+	if d, err := c.DescribeWorkflowExecution(c0, r.GetID(), ""); err != nil || d.GetWorkflowExecutionInfo().GetStatus() != enums.WORKFLOW_EXECUTION_STATUS_CANCELED {
+		t.Errorf("Temporal says the run is %v (%v)", d.GetWorkflowExecutionInfo().GetStatus(), err)
+	}
+	if _, ok, _ := s.Resolve(c0, loom.DefaultRef); ok {
+		t.Error("a cancelled run was recorded")
 	}
 }
