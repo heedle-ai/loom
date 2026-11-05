@@ -86,13 +86,18 @@ func ParseBudget(s string) (float64, error) {
 // empty, why the month couldn't be added up. It names the month, so a
 // new month knows it may resume the schedule.
 func budgetNote(usd float64, month time.Time, why string) string {
+	if strings.HasPrefix(why, "at most ") {
+		// Reached by a step that can only be bounded (review 48: the
+		// page showed it under budget, with nothing to say why).
+		return fmt.Sprintf("paused: monthly budget $%.2f reached (%s, est.) in %s", usd, why, month.Format("January 2006"))
+	}
 	if why != "" {
 		return fmt.Sprintf("paused: monthly budget $%.2f can't be checked in %s: %s", usd, month.Format("January 2006"), why)
 	}
 	return fmt.Sprintf("paused: monthly budget $%.2f reached (est.) in %s", usd, month.Format("January 2006"))
 }
 
-var budgetNoteMonth = regexp.MustCompile(`^paused: monthly budget \$[0-9]+\.[0-9]{2} (?:reached \(est\.\)|can't be checked) in ([A-Z][a-z]+ [0-9]{4})`)
+var budgetNoteMonth = regexp.MustCompile(`^paused: monthly budget \$[0-9]+\.[0-9]{2} (?:reached \((?:at most \$[0-9]+\.[0-9]{2}, )?est\.\)|can't be checked) in ([A-Z][a-z]+ [0-9]{4})`)
 
 // BudgetPaused reports whether note is a budget's pause note, and the
 // month it was paused in (January 2006).
@@ -252,6 +257,8 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 			}
 		}
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("%d of its steps this month have no estimate (step %s: %s)", len(c.Unpriced), x.Node, x.Why)))
+	case most >= b.Budget.USD && !c.Complete:
+		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("at most $%.2f", most)))
 	case most >= b.Budget.USD:
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, ""))
 	}
