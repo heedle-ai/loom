@@ -86,6 +86,26 @@ func TestInv_CostsCommand(t *testing.T) {
 	if !strings.Contains(out.String(), "loom: prices file "+prices) || !strings.Contains(out.String(), "using the built-in prices") || !strings.Contains(out.String(), "$0.06") {
 		t.Errorf("malformed prices:\n%s", out.String())
 	}
+	// A month whose only usage has no price: no dollar figure at all.
+	out.Reset()
+	if err := run(ctx, []string{"costs", "-store", dir, "-month", "2026-11", "-tz", "UTC", "-prices", prices}, &out); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(t.TempDir(), "s.git")
+	es, _ := warp.Init(ctx, empty)
+	b, _ := json.Marshal(pirn.Answer{Pirn: 1, Model: "claude-mythos-5-1", InputTokens: 7, OutputTokens: 3})
+	(&loom.Recorder{Store: es}).Record(ctx, loom.RecordInput{Program: src, Plan: p, Result: plan.Result{Outputs: map[string]string{"n0": string(b)}},
+		Ref: loom.DefaultRef, WorkflowID: "wf", RunID: "only", At: time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)})
+	out.Reset()
+	run(ctx, []string{"costs", "-store", empty, "-month", "2026-11", "-prices", prices}, &out)
+	if strings.Contains(out.String(), "$") || !strings.Contains(out.String(), "total: no estimate; 1 steps have none (tokens only)") {
+		t.Errorf("unpriced month:\n%s", out.String())
+	}
+	out.Reset()
+	run(ctx, []string{"costs", "-store", empty, "-month", "2025-01", "-prices", prices}, &out)
+	if !strings.Contains(out.String(), "no runs asked Claude in January 2025") {
+		t.Errorf("an empty month:\n%s", out.String())
+	}
 	for _, bad := range [][]string{
 		{"costs"},
 		{"costs", "-store", dir, "-month", "November"},
@@ -98,5 +118,15 @@ func TestInv_CostsCommand(t *testing.T) {
 		if err := run(ctx, bad, &out); err == nil {
 			t.Errorf("%v: no error", bad)
 		}
+	}
+}
+
+// TestInv_WorkerResumesBudgets: the worker itself looks for schedules a
+// new month resumes, so they resume whether or not heedle up's watcher
+// runs. (Review 48: only the watcher did.)
+func TestInv_WorkerResumesBudgets(t *testing.T) {
+	src, err := os.ReadFile("cli.go")
+	if err != nil || !strings.Contains(string(src), "go loom.ResumeBudgetsEvery(ctx, c, *queue,") {
+		t.Errorf("loom worker doesn't resume schedules in a new month (%v)", err)
 	}
 }

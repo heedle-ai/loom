@@ -44,6 +44,9 @@ const (
 	MemoSkipped = "loom-skipped"
 	// MaxBudget bounds a budget.
 	MaxBudget = 1e6
+	// ResumeBudgetsLook is how often a worker looks for schedules a new
+	// month resumes.
+	ResumeBudgetsLook = 5 * time.Minute
 	// budgetChange is RunWorkflow's version marker for the check, so
 	// scheduled runs started before it replay as they ran.
 	budgetChange = "loom-budget"
@@ -217,6 +220,9 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 		}
 	}
 	start, end := MonthOf(in.At, loc)
+	if err := warp.CheckRef(ctx, in.Ref); err != nil {
+		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, "its runs' ref "+strconv.Quote(in.Ref)+" isn't one"))
+	}
 	runs, err := RunsBetween(ctx, r.Store, in.Ref, start, end, in.Schedule)
 	if errors.Is(err, ErrTooManyRuns) {
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, err.Error()))
@@ -233,11 +239,20 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 		u = u.Add(run.Usage)
 	}
 	c := Cost(u, prices)
+	// A step that can't be priced exactly but can be bounded counts at
+	// its bound: a budget may stop a run early, never let one through.
+	most, bounded := c.AtMost()
 	switch {
-	case !c.Complete:
+	case !bounded:
 		x := c.Unpriced[0]
+		for _, y := range c.Unpriced {
+			if y.AtMost == nil {
+				x = y
+				break
+			}
+		}
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, fmt.Sprintf("%d of its steps this month have no estimate (step %s: %s)", len(c.Unpriced), x.Node, x.Why)))
-	case c.USD >= b.Budget.USD:
+	case most >= b.Budget.USD:
 		return r.pause(ctx, in.Schedule, budgetNote(b.Budget.USD, start, ""))
 	}
 	return "", nil
@@ -303,34 +318,35 @@ func SetBudget(ctx context.Context, c client.Client, name string, b Budget) erro
 		return err
 	}
 	h := c.ScheduleClient().GetHandle(ctx, SchedulePrefix+name)
-	var was Budget
-	var paused bool
-	var note string
+	// One update sets the budget and, if its budget paused the schedule
+	// and the new one is none or higher, resumes it: a separate unpause
+	// could reach Temporal's scheduler before the update and be undone
+	// by it (review 48's end-to-end test caught it).
 	err := h.Update(ctx, client.ScheduleUpdateOptions{DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
 		s := in.Description.Schedule
 		a, ok := s.Action.(*client.ScheduleWorkflowAction)
 		if !ok {
 			return nil, fmt.Errorf("loom: schedule %q doesn't start a run", name)
 		}
-		var err error
-		if was, err = budgetOf(a.Memo); err != nil {
+		was, err := budgetOf(a.Memo)
+		if err != nil {
 			return nil, err
 		}
-		paused, note = s.State.Paused, s.State.Note
 		a.Memo = budgetMemo(a.Memo, b)
+		if s.State != nil {
+			if _, byBudget := BudgetPaused(s.State.Note); s.State.Paused && byBudget && (b.USD == 0 || b.USD > was.USD) {
+				st := *s.State
+				st.Paused, st.Note = false, fmt.Sprintf("resumed: monthly budget changed to $%.2f", b.USD)
+				s.State = &st
+			}
+		}
 		return &client.ScheduleUpdate{Schedule: &s}, nil
 	}})
 	var nf *serviceerror.NotFound
 	if errors.As(err, &nf) {
 		return fmt.Errorf("%w %q", ErrNoSchedule, name)
 	}
-	if err != nil {
-		return err
-	}
-	if _, byBudget := BudgetPaused(note); paused && byBudget && (b.USD == 0 || b.USD > was.USD) {
-		return h.Unpause(ctx, client.ScheduleUnpauseOptions{Note: fmt.Sprintf("resumed: monthly budget changed to $%.2f", b.USD)})
-	}
-	return nil
+	return err
 }
 
 // ResumeBudgets resumes the schedules on taskQueue its budget paused in
@@ -389,4 +405,24 @@ func resumeBudget(ctx context.Context, c client.Client, name, taskQueue string, 
 		return false, nil
 	}
 	return true, h.Unpause(ctx, client.ScheduleUnpauseOptions{Note: "resumed: a new month"})
+}
+
+// ResumeBudgetsEvery runs ResumeBudgets every so often until ctx ends:
+// the worker does, so a new month resumes a schedule whether or not
+// anyone is watching for notices (review 48). logf hears of failures.
+func ResumeBudgetsEvery(ctx context.Context, c client.Client, taskQueue string, every time.Duration, logf func(string, ...any)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if names, err := ResumeBudgets(ctx, c, taskQueue, time.Now()); err != nil && ctx.Err() == nil {
+			logf("budgets: can't look for schedules to resume: %v", err)
+		} else if len(names) > 0 {
+			logf("budgets: a new month resumed %v", names)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

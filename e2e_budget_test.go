@@ -9,6 +9,7 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 
@@ -152,11 +153,19 @@ func TestE2E_BudgetPausesASchedule(t *testing.T) {
 		t.Fatalf("a new month: %v", got)
 	}
 	h.Pause(c0, client.SchedulePauseOptions{Note: note})
+	// Temporal applies a pause in a moment: wait to see it, as a person
+	// raising a budget would.
+	for !must(h.Describe(c0)).Schedule.State.Paused {
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err := loom.SetBudget(c0, c, "news", loom.Budget{USD: 0.10}); err != nil {
 		t.Fatal(err)
 	}
-	if d := must(h.Describe(c0)); d.Schedule.State.Paused {
-		t.Errorf("raised budget, still paused: %+v", d.Schedule.State)
+	// And unpauses in a moment.
+	for deadline := time.Now().Add(10 * time.Second); must(h.Describe(c0)).Schedule.State.Paused; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("raised budget, still paused: %+v", must(h.Describe(c0)).Schedule.State)
+		}
 	}
 	if b := must((loom.TemporalSchedules{Client: c}).Budget(c0, "news")); b.Budget != (loom.Budget{USD: 0.10}) {
 		t.Errorf("budget now %+v", b)
@@ -164,5 +173,16 @@ func TestE2E_BudgetPausesASchedule(t *testing.T) {
 	// Under the new budget, it runs.
 	if third := runNow(3); third.Skipped != "" || len(steps) != 2 {
 		t.Errorf("third run: %+v", third)
+	}
+	// SetBudget sends the action's memo back to Temporal: the rest of it
+	// must survive, not be encoded twice (review 48).
+	a := must(h.Describe(c0)).Info.RecentActions[2].StartWorkflowResult
+	d3, err := c.DescribeWorkflowExecution(c0, a.WorkflowID, a.FirstExecutionRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref string
+	if p := d3.WorkflowExecutionInfo.GetMemo().GetFields()[loom.MemoRef]; p == nil || converter.GetDefaultDataConverter().FromPayload(p, &ref) != nil || ref != loom.DefaultRef {
+		t.Errorf("the run's memo after SetBudget: %q", ref)
 	}
 }
