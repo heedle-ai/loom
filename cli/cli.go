@@ -61,6 +61,9 @@ const usage = `usage:
   loom secret  (set NAME | delete NAME | delete --all)
   loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
+  loom cancel     [-address HOST:PORT] WORKFLOW [RUN]
+  loom containers [-address HOST:PORT] [-stop WORKFLOW | -clean]
+  loom images     [-keep REF ...] [-prune]
 `
 
 // Run runs one loom command: args are the command's name and its
@@ -114,6 +117,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
+	stopRun := fs.String("stop", "", "containers: the run (its workflow ID) to stop, through Temporal")
+	clean := fs.Bool("clean", false, "containers: remove heedle's containers whose run has ended")
+	prune := fs.Bool("prune", false, "images: remove heedle's images that aren't kept (-keep) and that no container uses")
+	var keep refs
+	fs.Var(&keep, "keep", "images: an image to keep (repo@sha256:…), as many times as needed")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -172,7 +180,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// Skills are the store's, at their newest when the worker starts;
 		// each run is checked against, and records, the versions it pins.
 		lib := &treadle.Library{Store: s}
-		skipped, err := treadle.Register(ctx, reg, w, agent, lib)
+		skipped, err := treadle.Register(ctx, reg, loom.Labelled(w), agent, lib)
 		if err != nil {
 			return err
 		}
@@ -402,6 +410,36 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprint(out, written.Program)
 		fmt.Fprintf(out, "; %d steps, compiled (attempt %d); run it with: loom run -store DIR -f FILE\n", len(written.Plan.Nodes), written.Attempts)
 		return nil
+
+	case "cancel":
+		if fs.NArg() < 1 || fs.NArg() > 2 {
+			return errors.New("cancel needs a run's workflow ID (and, optionally, its run ID)\n" + usage)
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		return cancelCommand(ctx, out, c, fs.Arg(0), fs.Arg(1))
+
+	case "containers":
+		if fs.NArg() != 0 || *stopRun != "" && *clean {
+			return errors.New("containers takes at most one of -stop WORKFLOW or -clean\n" + usage)
+		}
+		// The listing works without Temporal (runs show as unknown);
+		// stopping and cleaning need it.
+		c, err := client.NewLazyClient(client.Options{HostPort: *address})
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		return containersCommand(ctx, out, c, *stopRun, *clean)
+
+	case "images":
+		if fs.NArg() != 0 {
+			return errors.New("images takes only -keep and -prune\n" + usage)
+		}
+		return imagesCommand(ctx, out, keep, *prune)
 
 	case "writes":
 		if *workflowID == "" || fs.NArg() != 0 || *approveWrite != "" && *declineWrite != "" {
@@ -752,22 +790,24 @@ func imageRegistryFor(repo string) *bobbin.ImageRegistry {
 // against registry() with the plan's skill pins.
 func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, act pirn.Act, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
 	reg := draft.DefaultRegistry()
-	if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
+	// Every step's containers are labelled with its run and step (LOOM-500).
+	steps := loom.Labelled(w)
+	if err := bobbin.Register(reg, steps, bobbin.Runner{}); err != nil {
 		return nil, err
 	}
-	if err := bobbin.RegisterImage(reg, w, bobbin.Runner{}, images); err != nil {
+	if err := bobbin.RegisterImage(reg, steps, bobbin.Runner{}, images); err != nil {
 		return nil, err
 	}
-	if err := reed.Register(reg, w, browser); err != nil {
+	if err := reed.Register(reg, steps, browser); err != nil {
 		return nil, err
 	}
-	if err := pirn.Register(reg, w, claude); err != nil {
+	if err := pirn.Register(reg, steps, claude); err != nil {
 		return nil, err
 	}
-	if err := pirn.RegisterAgent(reg, w, agent); err != nil {
+	if err := pirn.RegisterAgent(reg, steps, agent); err != nil {
 		return nil, err
 	}
-	if err := pirn.RegisterAct(reg, w, act); err != nil {
+	if err := pirn.RegisterAct(reg, steps, act); err != nil {
 		return nil, err
 	}
 	return reg, nil
