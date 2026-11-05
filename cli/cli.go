@@ -51,6 +51,7 @@ const usage = `usage:
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
   loom skills  -store DIR -create "DESCRIPTION" -agent-image ID
+  loom skills  publish NAME -repo DIR -store DIR
   loom skills  -store DIR (-review NAME | -approve NAME@VERSION [-replacing VERSION] | -reject NAME@VERSION | -trust PREFIX | -untrust PREFIX | -trusted)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun] [-allow-act]
@@ -113,6 +114,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	runNow := fs.String("run", "", "schedules: the schedule to run once now")
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
+	repoDir := fs.String("repo", "", "skills publish: a clone of your repository to publish the skill into, at skills/NAME (it commits; you push)")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -443,6 +445,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 
 	case "skills":
+		if fs.NArg() > 0 && fs.Arg(0) == "publish" {
+			return publishSkill(ctx, out, fs, *store, repoDir)
+		}
 		set := 0
 		for _, f := range []string{*add, *importSkill, *catalog, *review, *approveWrite, *reject, *trust, *untrust, *createSkill} {
 			if f != "" {
