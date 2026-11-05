@@ -100,7 +100,7 @@ func memoryProblem(text string) string {
 		return "a memory must be text"
 	case utf8.RuneCountInString(t) > MaxMemoryText:
 		return fmt.Sprintf("a memory is at most %d characters", MaxMemoryText)
-	case strings.ContainsFunc(t, hidden):
+	case hiddenText(t):
 		// Review 47: tag characters and bidirectional overrides hid text
 		// the page didn't show, and a zero-width space split "password".
 		return "a memory is one line of plain text, with nothing invisible in it"
@@ -111,13 +111,60 @@ func memoryProblem(text string) string {
 	return ""
 }
 
-// hidden is a character a memory may not hold: one that isn't shown as
-// itself (controls, format characters such as zero-width ones and
-// bidirectional overrides, line and paragraph separators, private-use and
-// surrogate code points, noncharacters).
+// hiddenText is whether t holds a character that isn't shown as itself,
+// which could carry words the page doesn't show: controls, format
+// characters such as zero-width ones and bidirectional overrides, line and
+// paragraph separators, private-use and surrogate code points,
+// noncharacters, variation selectors and blank fillers (review 47). The
+// few that join visible text are allowed where they do: a zero-width
+// joiner between symbols (an emoji family), a zero-width non-joiner
+// between letters (Persian), an emoji's variation selector after a
+// symbol, and the tags of a flag after its black flag.
+func hiddenText(t string) bool {
+	rs := []rune(t)
+	flag := false
+	for i, r := range rs {
+		prev, next := rune(0), rune(0)
+		if i > 0 {
+			prev = rs[i-1]
+		}
+		if i+1 < len(rs) {
+			next = rs[i+1]
+		}
+		switch {
+		case r == 0x1F3F4:
+			flag = true
+			continue
+		case r >= 0xE0020 && r <= 0xE007F && flag:
+			if r == 0xE007F {
+				flag = false
+			}
+			continue
+		case r == 0x200D && (symbol(prev) || prev == 0xFE0F) && symbol(next):
+			continue
+		case r == 0x200C && unicode.IsLetter(prev) && unicode.IsLetter(next):
+			continue
+		case (r == 0xFE0E || r == 0xFE0F) && (symbol(prev) || prev == 0x20E3):
+			continue
+		}
+		flag = false
+		if hidden(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// symbol is an emoji or other pictograph a joiner or selector may follow.
+func symbol(r rune) bool {
+	return unicode.In(r, unicode.So, unicode.Sk) || (r >= 0x1F000 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x27BF)
+}
+
+// hidden is a character a memory may not hold on its own.
 func hidden(r rune) bool {
-	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Co, unicode.Cs) ||
-		r == utf8.RuneError || r&0xFFFE == 0xFFFE || (r >= 0xFDD0 && r <= 0xFDEF)
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Co, unicode.Cs, unicode.Variation_Selector) ||
+		r == utf8.RuneError || r&0xFFFE == 0xFFFE || (r >= 0xFDD0 && r <= 0xFDEF) ||
+		r == 0x034F || r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0 || r == 0x2800 || r == 0x180E
 }
 
 // Problems are, for each memory that couldn't be remembered as it is now
@@ -351,11 +398,21 @@ func lockMemory(path string) (func(), error) {
 		return nil, err
 	}
 	lock := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".lock")
+	var tok [8]byte
+	if _, err := rand.Read(tok[:]); err != nil {
+		return nil, err
+	}
+	token := hex.EncodeToString(tok[:])
 	deadline := time.Now().Add(memoryLockWait)
 	for {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
+			_, err = f.WriteString(token)
 			f.Close()
+			if err != nil {
+				os.Remove(lock)
+				return nil, err
+			}
 			break
 		}
 		if !errors.Is(err, os.ErrExist) {
@@ -375,7 +432,13 @@ func lockMemory(path string) (func(), error) {
 			os.Remove(s)
 		}
 	}
-	return func() { os.Remove(lock) }, nil
+	// Removed only if it's still this one's: a holder whose lock was taken
+	// over as stale never removes the new holder's (review 47).
+	return func() {
+		if b, err := os.ReadFile(lock); err == nil && string(b) == token {
+			os.Remove(lock)
+		}
+	}, nil
 }
 
 // A change to the memory file takes milliseconds: a lock older than
@@ -471,7 +534,8 @@ func AddMemory(path, version, text string, now time.Time) (Memory, error) {
 
 var errAlready = errors.New("already remembered")
 
-// EditMemory changes the text of the memory id.
+// EditMemory changes the text of the memory id. The memory gets a new ID:
+// to the conversation, the old words are forgotten.
 func EditMemory(path, version, id, text string) (Memories, error) {
 	if err := CheckMemoryText(text); err != nil {
 		return nil, err
@@ -485,7 +549,16 @@ func EditMemory(path, version, id, text string) (Memories, error) {
 		if slices.ContainsFunc(ms, func(m Memory) bool { return m.ID != id && strings.EqualFold(m.Text, text) }) {
 			return nil, fmt.Errorf("%w: heedle already remembers that", ErrMemoryInvalid)
 		}
-		ms[i].Text = text
+		if ms[i].Text == text {
+			return ms, nil
+		}
+		// New words are a new memory, with a new ID, so what was proposed
+		// with the old words is left out like a forgotten one's (review 47).
+		nid, err := newMemoryID(ms)
+		if err != nil {
+			return nil, err
+		}
+		ms[i] = Memory{ID: nid, Text: text, Added: ms[i].Added}
 		return ms, nil
 	})
 }
@@ -553,13 +626,14 @@ var secretShapes = []struct {
 	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY`), "a private key"},
 	{regexp.MustCompile(`\b(sk-ant-|sk-proj-|sk-[A-Za-z0-9]{20}|(sk|rk|pk)_(live|test)_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AIza[0-9A-Za-z_-]{20}|(AKIA|ASIA)[0-9A-Z]{16}|npm_[A-Za-z0-9]{20})`), "an API key or token"},
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`), "a sign-in token"},
-	// A password said: "password is …", "pw: …", "passcode for the gym: …";
-	// not "I use a password manager" (review 47).
-	{regexp.MustCompile(`(?i)\b(pass ?words?|passwd|pwd|pw|pass ?codes?|pass ?phrases?|passwort|kennwort|mot de passe|contraseña|senha|login)\b(\s+for\b[^:=]{0,40})?\s*(is|ist|est|es|é|:|=)\s*\S`), "a password"},
+	// A sign-in written out: someone@example.com / hunter2.
+	{regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+\s*[/:|]\s*\S`), "a password"},
 	{regexp.MustCompile(`(?i)\b(pin|cvv|cvc|security code)\s*(is|:|=)\s*\d{3,}`), "a PIN or card code"},
 	{regexp.MustCompile(`(?i)\b(pin|door|gate|alarm|access|entry|garage|lock|safe)[ -]?code\b\s*(is|:|=)?\s*\d{3,}`), "a PIN or door code"},
 	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), "an identity number"},
-	{regexp.MustCompile(`(?i)\b(ssn|social security( number)?|passport( number| no\.?)?)\s*(is|:|=|#)?\s*[A-Z0-9]{6,}`), "an identity number"},
+	// An identity number given: "SSN: …", "passport number is X1234567";
+	// not "Passport country: Ireland" (review 47).
+	{regexp.MustCompile(`(?i)\b(ssn|social security number|passport (number|no\.?))\s*(is|:|=|#)?\s*[A-Z0-9]*\d[A-Z0-9-]{4,}`), "an identity number"},
 }
 
 var opaque = regexp.MustCompile(`[A-Za-z0-9+/_=.-]{24,}`)
@@ -582,6 +656,9 @@ func LooksSecret(text string) string {
 			return s.what
 		}
 	}
+	if passwordGiven(text) {
+		return "a password"
+	}
 	// A long piece of mixed letters and digits, between the separators a
 	// URL, a date or a name has (review 47: a dated URL path was a "key").
 	for _, run := range opaque.FindAllString(text, -1) {
@@ -600,6 +677,31 @@ func LooksSecret(text string) string {
 		}
 	}
 	return ""
+}
+
+var passwordWord = regexp.MustCompile(`(?i)\b(pass ?word|passwd|pwd|pw|pass ?code|pass ?phrase|passwort|kennwort|mot de passe|contraseña|senha)\b`)
+
+// notAPassword are the words after a password word that make it talk
+// about passwords rather than give one: "a password manager", "password
+// reset", "passwords".
+var notAPassword = regexp.MustCompile(`(?i)^(s\b|\s*(managers?|vaults?|resets?|apps?|policy|policies|rules?|changes?|hints?)\b)`)
+
+// passwordGiven is whether text gives a password: a password word that
+// isn't plural or part of "password manager" and the like, with something
+// after it ("password hunter2", "wifi password Fluffy123", "pw: x"). It
+// errs on refusing: "Pw: always ask me first." is refused too (review 47:
+// a password with no "is" or ":" after it passed).
+func passwordGiven(text string) bool {
+	for _, m := range passwordWord.FindAllStringIndex(text, -1) {
+		rest := text[m[1]:]
+		if notAPassword.MatchString(rest) {
+			continue
+		}
+		if strings.TrimSpace(strings.Trim(strings.TrimSpace(rest), ".!?,;")) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // luhn is whether digits pass the Luhn check card numbers carry.
