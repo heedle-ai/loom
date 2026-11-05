@@ -53,6 +53,11 @@ type StepUsage struct {
 	Tokens   Tokens `json:"tokens"`
 	Requests int    `json:"requests,omitempty"`
 	Missing  string `json:"missing,omitempty"`
+	// Replayed is, for an act step that replayed an earlier run's script
+	// (roadmap 9.9), "all" when it did the whole task without Claude, and
+	// "part" when it handed the rest to Claude; its tokens are only
+	// Claude's part.
+	Replayed string `json:"replayed,omitempty"`
 }
 
 // Usage is the Claude usage of some steps: a run's, a proposal's, a
@@ -137,6 +142,10 @@ type counts struct {
 	InputTokens  *int64 `json:"inputTokens"`
 	OutputTokens *int64 `json:"outputTokens"`
 	Turns        *int   `json:"turns"`
+	Replay       *struct {
+		Replayed   int  `json:"replayed"`
+		HandedOver bool `json:"handedOver"`
+	} `json:"replay"`
 }
 
 // stepUsage reads one Claude step's output.
@@ -155,6 +164,9 @@ func stepUsage(out string, ask bool) StepUsage {
 		s.Requests = 0 // not known unless the result says how many turns
 		if c.Turns != nil && *c.Turns > 0 {
 			s.Requests = *c.Turns
+		}
+		if r := c.Replay; r != nil && r.Replayed > 0 {
+			s.Replayed = map[bool]string{false: "all", true: "part"}[r.HandedOver]
 		}
 	}
 	return s
