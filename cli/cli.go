@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ const usage = `usage:
   loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun] [-allow-act]
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
+  loom forms   [-address HOST:PORT] -workflow ID [-send ID | -cancel ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
   loom ask     [-address HOST:PORT] [-queue NAME] [-ref REF] [-then run|schedule] [-allow-act] "WHAT YOU WANT DONE"
   loom secret  (set NAME | delete NAME | delete --all)
@@ -126,6 +128,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
 	runNow := fs.String("run", "", "schedules: the schedule to run once now")
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
+	sendForm := fs.String("send", "", "forms: the ID of a form waiting to be sent, to send it")
+	cancelForm := fs.String("cancel", "", "forms: the ID of a form waiting to be sent, to cancel it (nothing is sent)")
 	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
 	repoDir := fs.String("repo", "", "skills publish: a clone of your repository to publish the skill into, at skills/NAME (it commits; you push)")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
@@ -195,7 +199,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault,
 			LoadConnectors: loadConnectors}
-		act := pirn.Act{Claude: claude, Browser: pirn.ReedBrowser{Browser: reed.Browser{Image: *browserAgentImage, Network: *browserNetwork}}, Image: *browserAgentImage}
+		act := pirn.Act{Claude: claude, Browser: pirn.ReedBrowser{Browser: reed.Browser{Image: *browserAgentImage, Network: *browserNetwork}}, Image: *browserAgentImage,
+			Confirm: loom.Confirmer(c)} // a person confirms each send (roadmap 9.7)
 		reg, err := workerCommands(w, claude, agent, act, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
@@ -489,6 +494,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return errors.New("images takes only -keep and -prune\n" + usage)
 		}
 		return imagesCommand(ctx, out, keep, *prune)
+
+	case "forms":
+		if *workflowID == "" || fs.NArg() != 0 || *sendForm != "" && *cancelForm != "" {
+			return errors.New("forms needs -workflow ID, and at most one of -send or -cancel\n" + usage)
+		}
+		c, err := client.Dial(client.Options{HostPort: *address})
+		if err != nil {
+			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
+		}
+		defer c.Close()
+		return formsCommand(ctx, out, c, *workflowID, *sendForm, *cancelForm)
 
 	case "writes":
 		if *workflowID == "" || fs.NArg() != 0 || *approveWrite != "" && *declineWrite != "" {
@@ -1134,17 +1150,41 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 // person said -allow-act, saying what they would do: the card isn't the
 // only way in (review 39).
 func actAllowed(p plan.Plan, ok bool) error {
-	hosts := loom.ActHosts(p)
-	if len(hosts) == 0 || ok {
+	if len(loom.ActHosts(p)) == 0 || ok {
 		return nil
 	}
-	return fmt.Errorf("its act steps %s: give -allow-act to let them", ActDisclosure(hosts))
+	return fmt.Errorf("its act steps %s: give -allow-act to let them", strings.Join(actDisclosures(p), "; "))
 }
 
-// ActDisclosure says what an act step may do without asking again, on
-// which hosts (roadmap 9.5): shown before a proposal runs.
-func ActDisclosure(hosts []string) string {
-	return "can click, type and submit forms on " + strings.Join(hosts, ", ") + " without asking again"
+// actDisclosures say what a plan's act steps may do, on which hosts:
+// fill forms and stop before sending to ask (roadmap 9.7), or, where the
+// program said :send-without-asking, send without asking again.
+func actDisclosures(p plan.Plan) []string {
+	freely := loom.ActSendsFreely(p)
+	var asks []string
+	for _, h := range loom.ActHosts(p) {
+		if !slices.Contains(freely, h) {
+			asks = append(asks, h)
+		}
+	}
+	var out []string
+	if len(asks) > 0 {
+		out = append(out, ActDisclosure(asks, false))
+	}
+	if len(freely) > 0 {
+		out = append(out, ActDisclosure(freely, true))
+	}
+	return out
+}
+
+// ActDisclosure says what act steps may do on hosts: fill in forms and
+// stop before sending to ask you (roadmap 9.7), or, freely, send without
+// asking again (roadmap 9.5's disclosure): shown before a proposal runs.
+func ActDisclosure(hosts []string, freely bool) string {
+	if freely {
+		return "can click, type and submit forms on " + strings.Join(hosts, ", ") + " without asking again"
+	}
+	return "can click and type on " + strings.Join(hosts, ", ") + ", and stop before sending and ask you"
 }
 
 // printProposal shows a proposal: what heedle would do, the program, when
@@ -1173,8 +1213,8 @@ func printProposal(out io.Writer, p loom.Proposal) {
 		fmt.Fprintf(out, "\nschedule %s: %s\n", p.Name, describeSpec(*p.Schedule))
 	}
 	if p.Plan != nil {
-		if hosts := loom.ActHosts(*p.Plan); len(hosts) > 0 {
-			fmt.Fprintf(out, "\n%s\n", ActDisclosure(hosts))
+		if d := actDisclosures(*p.Plan); len(d) > 0 {
+			fmt.Fprintf(out, "\nact steps %s\n", strings.Join(d, "; "))
 		}
 	}
 	if r := p.Ready; r != nil {
@@ -1362,6 +1402,31 @@ func memoryCommand(out io.Writer, file, add, forget string, forgetAll bool, extr
 	}
 	if why := problems[""]; why != "" {
 		fmt.Fprintf(out, "  can't go to Claude: %s\n", why)
+	}
+	return nil
+}
+
+// formsCommand lists the forms run workflowID's act steps wait to send,
+// or sends or cancels one (roadmap 9.7).
+func formsCommand(ctx context.Context, out io.Writer, c client.Client, workflowID, send, cancel string) error {
+	if id := send + cancel; id != "" {
+		if err := loom.DecideForm(ctx, c, workflowID, loom.FormDecision{ID: id, Send: send != ""}); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%s %s\n", map[bool]string{true: "sending", false: "cancelled"}[send != ""], id)
+		return nil
+	}
+	forms, err := loom.PendingForms(ctx, c, workflowID)
+	if err != nil {
+		return err
+	}
+	if len(forms) == 0 {
+		fmt.Fprintln(out, "no form waits to be sent")
+		return nil
+	}
+	for _, f := range forms {
+		fmt.Fprintf(out, "%s  step %s  %s\n  %s\n  send it: loom forms -workflow %s -send %s\n  cancel it: loom forms -workflow %s -cancel %s\n",
+			f.ID, f.Node, f.URL, f.Summary, workflowID, f.ID, workflowID, f.ID)
 	}
 	return nil
 }

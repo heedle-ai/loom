@@ -15,7 +15,8 @@ import (
 )
 
 // Notices are what to tell a person who isn't watching: a scheduled run
-// that ended, and a write that waits for their approval. A Watcher finds
+// that ended, a write that waits for their approval, and a form an act
+// step waits to send. A Watcher finds
 // them in Temporal, each once; heedle up shows them as the operating
 // system's notifications.
 
@@ -149,12 +150,42 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 			w.told[key] = now
 		}
 	}
+	// Forms waiting to be sent in runs going now (roadmap 9.7).
+	for i, e := range running {
+		if i == MaxRunsAsked {
+			break
+		}
+		wf, run := e.GetExecution().GetWorkflowId(), e.GetExecution().GetRunId()
+		qctx, cancel := context.WithTimeout(ctx, AskWithin)
+		forms, err := PendingForms(qctx, w.Client, wf)
+		cancel()
+		if err != nil {
+			continue
+		}
+		for _, f := range forms {
+			key := "form:" + wf + "/" + f.ID
+			waiting[key] = true
+			if _, ok := w.told[key]; !ok {
+				out = append(out, Notice{Key: key, Workflow: wf, Run: run,
+					Title: "heedle: a form is ready to send", Body: fmt.Sprintf("%s From step %s. Send or cancel it.", clipNotice(f.Summary), f.Node)})
+			}
+			w.told[key] = now
+		}
+	}
 	for k := range w.told {
-		if strings.HasPrefix(k, "write:") && !waiting[k] {
+		if (strings.HasPrefix(k, "write:") || strings.HasPrefix(k, "form:")) && !waiting[k] {
 			delete(w.told, k)
 		}
 	}
 	return out, nil
+}
+
+// clipNotice keeps a notification's text short: the system shows little.
+func clipNotice(s string) string {
+	if r := []rune(s); len(r) > 160 {
+		return string(r[:159]) + "…"
+	}
+	return s
 }
 
 // list reads every page (up to MaxPages) of runs matching query.
