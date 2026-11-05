@@ -46,7 +46,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
@@ -82,7 +82,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	into := fs.String("into", "", "merge: the ref to merge into")
 	resolve := fs.String("resolve", "", "merge: settle conflicting questions with ours, theirs or rerun")
 	browserImage := fs.String("browser-image", "", "worker: reed browser image ID for the browse command")
-	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse containers join")
+	browserAgentImage := fs.String("browser-agent-image", "", "worker: reed browser-agent image ID for the act command (Playwright MCP and Chromium)")
+	browserNetwork := fs.String("browser-network", "", "worker: Podman network browse and act containers join")
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY, or the keychain: loom secret set ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
@@ -162,7 +163,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault,
 			LoadConnectors: loadConnectors}
-		reg, err := workerCommands(w, claude, agent, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
+		act := pirn.Act{Claude: claude, Browser: pirn.ReedBrowser{Browser: reed.Browser{Image: *browserAgentImage, Network: *browserNetwork}}, Image: *browserAgentImage}
+		reg, err := workerCommands(w, claude, agent, act, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
 		}
@@ -191,7 +193,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			if err != nil {
 				return loom.Readiness{}, err
 			}
-			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != "", Browsers: *browserImage != ""})
+			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != "", Browsers: *browserImage != "", BrowserAgents: *browserAgentImage != ""})
 		}}
 		loom.RegisterWriter(w, writer)
 		loom.RegisterAsk(w, writer)
@@ -683,8 +685,9 @@ func printable(s string) string {
 // registry is the commands programs may use: draft's echo, bobbin's
 // container (a step in a fresh Podman container) and reed's browse (a page
 // in a fresh browser that may reach only the hosts the program names) and
-// pirn's ask (Claude, answering from the step's inputs) and agent (Claude
-// working in a fresh container).
+// pirn's ask (Claude, answering from the step's inputs), agent (Claude
+// working in a fresh container) and act (Claude filling in a form in a
+// fresh browser; roadmap 9.5).
 func registry() *draftregistry.Registry {
 	reg := draft.DefaultRegistry()
 	reg.MustRegister(bobbin.BuiltinSpec())
@@ -692,6 +695,7 @@ func registry() *draftregistry.Registry {
 	reg.MustRegister(reed.BuiltinSpec())
 	reg.MustRegister(pirn.BuiltinSpec())
 	reg.MustRegister(pirn.AgentBuiltinSpec())
+	reg.MustRegister(pirn.ActBuiltinSpec())
 	return reg
 }
 
@@ -739,7 +743,7 @@ func imageRegistryFor(repo string) *bobbin.ImageRegistry {
 // returns their registry: the same commands registry() has, which
 // TestWorkerCommandsAreTheRegistry checks, since a run is checked
 // against registry() with the plan's skill pins.
-func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
+func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, act pirn.Act, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
 	reg := draft.DefaultRegistry()
 	if err := bobbin.Register(reg, w, bobbin.Runner{}); err != nil {
 		return nil, err
@@ -754,6 +758,9 @@ func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, bro
 		return nil, err
 	}
 	if err := pirn.RegisterAgent(reg, w, agent); err != nil {
+		return nil, err
+	}
+	if err := pirn.RegisterAct(reg, w, act); err != nil {
 		return nil, err
 	}
 	return reg, nil
@@ -1018,6 +1025,12 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 	}
 }
 
+// ActDisclosure says what an act step may do without asking again, on
+// which hosts (roadmap 9.5): shown before a proposal runs.
+func ActDisclosure(hosts []string) string {
+	return "can click, type and submit forms on " + strings.Join(hosts, ", ") + " without asking again"
+}
+
 // printProposal shows a proposal: what heedle would do, the program, when
 // it would run, and whether it can run now and, if not, what to set up.
 func printProposal(out io.Writer, p loom.Proposal) {
@@ -1029,6 +1042,11 @@ func printProposal(out io.Writer, p loom.Proposal) {
 	fmt.Fprintf(out, "\n%s", p.Program)
 	if p.Schedule != nil {
 		fmt.Fprintf(out, "\nschedule %s: %s\n", p.Name, describeSpec(*p.Schedule))
+	}
+	if p.Plan != nil {
+		if hosts := loom.ActHosts(*p.Plan); len(hosts) > 0 {
+			fmt.Fprintf(out, "\n%s\n", ActDisclosure(hosts))
+		}
 	}
 	if r := p.Ready; r != nil {
 		fmt.Fprintln(out)
@@ -1050,6 +1068,9 @@ func readinessLines(r loom.Readiness) []string {
 	}
 	if r.Browser != "" {
 		out = append(out, "missing  browse steps: "+r.Browser)
+	}
+	if r.BrowserAgent != "" {
+		out = append(out, "missing  act steps: "+r.BrowserAgent)
 	}
 	switch r.Claude {
 	case "key":

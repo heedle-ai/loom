@@ -1,6 +1,6 @@
 module github.com/heedle-ai/loom
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/heedle-ai/bobbin v0.0.0
@@ -14,6 +14,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	go.temporal.io/api v1.62.2
 	go.temporal.io/sdk v1.41.1
+	google.golang.org/protobuf v1.36.6
 )
 
 require (
@@ -43,7 +44,7 @@ require (
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/moby/buildkit v0.10.6 // indirect
 	github.com/moby/sys/mountinfo v0.6.2 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.4.0 // indirect
+	github.com/modelcontextprotocol/go-sdk v1.5.0 // indirect
 	github.com/nexus-rpc/sdk-go v0.6.0 // indirect
 	github.com/openshift/imagebuilder v1.2.6-0.20231110114814-35a50d57f722 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
@@ -61,16 +62,16 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
+	golang.org/x/image v0.33.0 // indirect
 	golang.org/x/net v0.41.0 // indirect
-	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.27.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/sync v0.18.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240827150818-7e3bb234dfed // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240827150818-7e3bb234dfed // indirect
 	google.golang.org/grpc v1.67.1 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
