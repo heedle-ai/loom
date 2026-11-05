@@ -42,6 +42,11 @@ func TestInv_MemoryIsBoundedAndNeverASecret(t *testing.T) {
 		"I use a password manager.", "Never ask me for passwords.", "Ship to PIN 560001.", "Pin 1234 on the map is my hotel.",
 		"My blog: https://example.org/2026/11/05/three-days-in-lisbon-with-tiles-and-food", "Frequent flyer 1234567890123452 on TAP.",
 		"Likes <b>bold</b> & \"quoted\" names.",
+		// Review 47, round 2: refused as identity numbers, passwords or
+		// hidden text.
+		"Passport country: Ireland.", "My passport expires in March 2027.", "Passport holder: British.", "Keep my passport number out of forms.",
+		"Social security benefits start next year.", "Login is with my work email.", "Travelling with \U0001F468\u200D\U0001F469\u200D\U0001F467.",
+		"\u06AF\u06CC\u0627\u0647\u200C\u062E\u0648\u0627\u0631 \u0647\u0633\u062A\u0645.", "Supports \U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F at rugby.", "I \u2764\uFE0F tiles.",
 		strings.Repeat("é", loom.MaxMemoryText)} {
 		if err := loom.CheckMemoryText(ok); err != nil {
 			t.Errorf("%q refused: %v", ok, err)
@@ -55,7 +60,11 @@ func TestInv_MemoryIsBoundedAndNeverASecret(t *testing.T) {
 		// Review 47: these were kept, or hid text the page didn't show.
 		"pw: hunter2", "my pwd is hunter2", "door code 4921", "my pin code is 4921", "SSN 123-45-6789", "card 4111\u00a01111\u00a01111\u00a01111",
 		"sk_live_51Habcdefghijklmnop", "mein Passwort ist geheim", "mot de passe: soleil", "my pass\u200bword is hunter2",
-		"Vegetarian.\U000E0041\U000E006C\U000E0077\U000E0061\U000E0079\U000E0073", "abc\u202Edef", "one\u2028two", "private \uE000 use"} {
+		"Vegetarian.\U000E0041\U000E006C\U000E0077\U000E0061\U000E0079\U000E0073", "abc\u202Edef", "one\u2028two", "private \uE000 use",
+		// Review 47, round 2: passwords with nothing between, a sign-in
+		// written out, and text hidden in selectors and fillers.
+		"password hunter2", "wifi password Fluffy123", "my gmail password hunter2", "gym passcode 7731", "Netflix: bob@x.com / hunter2",
+		"Vegetarian.\uFE01\uFE02\U000E0101\U000E0142", "Vegetarian\u034f\u115f\u3164\u2800.", "a\u200Db", "\U000E0067\U000E0062 untagged"} {
 		if err := loom.CheckMemoryText(bad); !errors.Is(err, loom.ErrMemoryInvalid) {
 			t.Errorf("%q allowed: %v", bad, err)
 		}
@@ -293,6 +302,13 @@ func TestInv_MemoryReachesClaudeOnlyAsASource(t *testing.T) {
 			t.Errorf("no memory: %+v %v", p, err)
 		}
 	}
+	// A request from another machine (drawdown's NoMemory) sends none.
+	a4 := &scripted{replies: []string{good}}
+	w4 := writer(a4)
+	w4.MemoryFile = path
+	if p, err := w4.Ask(ctx, loom.AskRequest{Request: "x", NoMemory: true}); err != nil || len(p.Memory) != 0 || a4.asked[0].Sources[len(a4.asked[0].Sources)-1].ID == loom.MemorySourceID {
+		t.Errorf("NoMemory: %+v %v", p, err)
+	}
 	// A memory file with a problem says so; nothing is asked.
 	bad := filepath.Join(t.TempDir(), "memory.json")
 	os.WriteFile(bad, []byte("{"), 0o600)
@@ -345,6 +361,21 @@ func TestInv_RememberIsOnlySuggested(t *testing.T) {
 	p, err := w.Ask(ctx, loom.AskRequest{Request: "Remember that I'm vegetarian"})
 	if err != nil || p.Program != "" || p.Plan != nil || p.Skill != "" || p.Schedule != nil || !reflect.DeepEqual(p.Remember, []string{"Vegetarian."}) {
 		t.Errorf("only to remember: %+v %v", p, err)
+	}
+	// However it's put, a request to remember may propose only that; a
+	// request to do something may not (review 47, round 2).
+	only := reply(`"summary": "heedle could remember that.", "remember": ["Vegetarian."]`)
+	for _, req := range []string{"Can you remember that I'm vegetarian?", "I'm vegetarian, please remember that.", "From now on, remember I'm vegetarian",
+		"Merke dir: ich bin Vegetarier", "Keep in mind I'm vegetarian", "remember: vegetarian"} {
+		if _, err := writer(&scripted{replies: []string{only}}).Ask(ctx, loom.AskRequest{Request: req}); err != nil {
+			t.Errorf("%q: %v", req, err)
+		}
+	}
+	for _, req := range []string{"Remember to book the Lisbon train for Friday", "Note: plan Porto for next weekend", "Plan Porto, I'm vegetarian"} {
+		a := &scripted{replies: []string{only}}
+		if _, err := writer(a).Ask(ctx, loom.AskRequest{Request: req}); err == nil || !strings.Contains(a.asked[1].Sources[len(a.asked[1].Sources)-1].Text, "asks for something to be done") {
+			t.Errorf("%q: %v", req, err)
+		}
 	}
 	if !strings.Contains(a.asked[0].Instruction, `"remember"`) {
 		t.Error("Claude isn't asked for things to remember")
@@ -460,6 +491,20 @@ func TestInv_ForgottenMemoryLeavesTheConversation(t *testing.T) {
 		}
 		if s.ID == "conversation" && (!strings.Contains(s.Text, "Asked: Plan Lisbon\nProposed: (left out") || !strings.Contains(s.Text, "Proposed: Hello.")) {
 			t.Errorf("the conversation: %q", s.Text)
+		}
+	}
+	// Edited: new words are a new memory, so what the turn proposed with
+	// the old words is left out too (review 47, round 2).
+	path2 := memoryFile(t, "Allergic to peanuts.")
+	old := mustRead(t, path2)[0].ID
+	edited, err := loom.EditMemory(path2, "", old, "No allergies after all.")
+	if err != nil || edited[0].ID == old || edited[0].Text != "No allergies after all." || !edited[0].Added.Equal(day) {
+		t.Fatalf("edit: %+v %v", edited, err)
+	}
+	q := askWith(t, path2, loom.Turn{Request: "Plan Lisbon", Summary: "Lisbon, avoiding peanuts.", Memory: []string{old}})
+	for _, s := range q.Sources {
+		if strings.Contains(s.Text, "peanut") {
+			t.Errorf("after an edit, source %s still says: %q", s.ID, s.Text)
 		}
 	}
 	if _, err := w.Ask(ctx, loom.AskRequest{Request: "x", Earlier: []loom.Turn{{Request: "r", Memory: []string{"not-an-id"}}}}); !errors.Is(err, pirn.ErrInvalid) {
