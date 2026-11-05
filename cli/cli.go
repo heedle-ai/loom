@@ -188,6 +188,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if _, err := loom.ReadPrices(*pricesFile); err != nil {
 			fmt.Fprintln(out, err)
 		}
+		// A new month resumes the schedules their budget paused that are
+		// to resume (roadmap 10.4).
+		go loom.ResumeBudgetsEvery(ctx, c, *queue, loom.ResumeBudgetsLook, func(f string, a ...any) { fmt.Fprintf(out, f+"\n", a...) })
 		// Skills change only through a workflow on this worker (drawdown never
 		// writes), never through a program.
 		loom.RegisterSkills(w, loom.Skills{Library: lib, Create: creator(agent)})
