@@ -713,6 +713,13 @@ func TestInv_ActNeedsAllowAct(t *testing.T) {
 			t.Errorf("%v -allow-send-without-asking: %v", args[0], err)
 		}
 	}
+	// Review 42: -allow-act runs a program using details only after
+	// saying which.
+	var said bytes.Buffer
+	run(ctx, []string{"run", "-allow-act", "-address", "127.0.0.1:1", `(act "x" "https://forms.example.org/" :uses "name email")`}, &said)
+	if !strings.Contains(said.String(), "act steps may use your name and email\n") {
+		t.Errorf("run with details: %q", said.String())
+	}
 	fpl, err := loom.Compile(ctx, registry(), free)
 	if err != nil {
 		t.Fatal(err)
@@ -849,5 +856,22 @@ func TestInv_AskSaysWhatMemoryDid(t *testing.T) {
 	printProposal(&out, loom.Proposal{Summary: "heedle could remember that you're vegetarian.", Remember: []string{"Vegetarian."}})
 	if got := out.String(); strings.Count(got, "\n\n") != 1 || !strings.Contains(got, "heedle memory -add") {
 		t.Errorf("only to remember: %q", got)
+	}
+}
+
+// TestInv_SecretCommandsLeaveDetailsBe: heedle secret set and delete
+// refuse the names the person's details are kept under, which the
+// Connectors page's You section keeps (review 42); delete --all forgets
+// them with every other heedle secret.
+func TestInv_SecretCommandsLeaveDetailsBe(t *testing.T) {
+	kc := fakeKeychain{"HEEDLE_PROFILE_EMAIL": "YWRhQGV4YW1wbGUub3Jn"}
+	oldVault := vault
+	t.Cleanup(func() { vault, stdin = oldVault, os.Stdin })
+	vault = kc
+	for _, op := range []string{"set", "delete"} {
+		stdin = strings.NewReader("x\n")
+		if err := Run(context.Background(), []string{"secret", op, "HEEDLE_PROFILE_EMAIL"}, io.Discard); err == nil || !strings.Contains(err.Error(), "one of your details") || kc["HEEDLE_PROFILE_EMAIL"] == "" {
+			t.Errorf("secret %s: %v %v", op, err, kc)
+		}
 	}
 }
