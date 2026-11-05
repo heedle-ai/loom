@@ -6,11 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/stretchr/testify/mock"
+	"go.temporal.io/api/common/v1"
+	"go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/testsuite"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -614,7 +619,7 @@ func TestInv_AskSaysWhatsMissing(t *testing.T) {
 		"skill to run": {loom.Proposal{Summary: "s", Skill: "a skill"}, "schedule"},
 		"unknown":      {loom.Proposal{Summary: "s", Program: "(echo)", Plan: &pl}, "run"}, // review 33
 	} {
-		if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, c.then, false, c.p); err == nil {
+		if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, c.then, false, false, c.p); err == nil {
 			t.Errorf("%s: -then %s went ahead", name, c.then)
 		}
 	}
@@ -643,7 +648,7 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 	out.Reset()
 	pl.Nodes = append(pl.Nodes, plan.Node{ID: "n1", Activity: pirn.ActActivityName, Args: []string{"pay", "https://shop.example.org/", pirn.SendFreely}})
 	printProposal(&out, loom.Proposal{Summary: "Both.", Program: `(par (act "sign up" "https://forms.example.org/" "cdn.example.org") (act "pay" "https://shop.example.org/" :send-without-asking))`, Plan: &pl})
-	if want := "act steps can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you; can click, type and submit forms on shop.example.org without asking again"; !strings.Contains(out.String(), want) {
+	if want := "\nact steps can click and type on cdn.example.org, forms.example.org, and stop before sending and ask you\n! act steps can click, type and submit forms on shop.example.org without asking again\n"; !strings.Contains(out.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, out.String())
 	}
 	out.Reset()
@@ -680,10 +685,71 @@ func TestInv_ActNeedsAllowAct(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := loom.Proposal{Program: prog, Plan: &pl, Ready: &loom.Readiness{Ready: true}}
-	if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, "run", false, p); err == nil || !strings.Contains(err.Error(), want) {
+	if err := askThen(ctx, io.Discard, nil, "loom", loom.DefaultRef, "run", false, false, p); err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("ask -then run: %v", err)
 	}
-	if err := actAllowed(plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo"}}}, false); err != nil {
+	if err := actAllowed(plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo"}}}, false, false); err != nil {
 		t.Errorf("no act step: %v", err)
 	}
+	// Review 41: a step that sends without asking needs its own flag, so
+	// a habit of -allow-act never lets one through unseen.
+	free := `(act "Join as Ada" "https://forms.example.org/" "cdn.example.org" :send-without-asking)`
+	for _, args := range [][]string{
+		{"run", "-allow-act", "-address", "127.0.0.1:1", free},
+		{"schedule", "-allow-act", "-name", "s", "-every", "24h", "-address", "127.0.0.1:1", free},
+	} {
+		if err := run(ctx, args, io.Discard); err == nil || !strings.Contains(err.Error(), "without asking again: give -allow-send-without-asking") {
+			t.Errorf("%v: %v", args[0], err)
+		}
+		with := append(args[:2:2], append([]string{"-allow-send-without-asking"}, args[2:]...)...)
+		if err := run(ctx, with, io.Discard); err == nil || strings.Contains(err.Error(), "-allow-") {
+			t.Errorf("%v -allow-send-without-asking: %v", args[0], err)
+		}
+	}
+	fpl, err := loom.Compile(ctx, registry(), free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shown strings.Builder
+	printProposal(&shown, loom.Proposal{Summary: "x", Program: free, Plan: &fpl})
+	if !strings.Contains(shown.String(), "\n! act steps can click, type and submit forms on cdn.example.org, forms.example.org without asking again\n") {
+		t.Errorf("not shown apart: %s", shown.String())
+	}
+}
+
+// TestInv_FormsShowTheFilledForm: loom forms lists each form a run waits
+// to send with its summary and a file of its screenshot, so a person at
+// the terminal sees the filled form before deciding; one decided already
+// isn't listed. (Review 41.)
+func TestInv_FormsShowTheFilledForm(t *testing.T) {
+	dc := converter.GetDefaultDataConverter()
+	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 2, 3}
+	beat, _ := dc.ToPayloads(pirn.ActBeat{Frame: reed.Frame{URL: "https://forms.example.org/x", JPEG: jpeg},
+		Pending: &pirn.ActPending{ID: "f00d", Node: "n0", Summary: "Name Ada.", URL: "https://forms.example.org/x"}})
+	c := &mocks.Client{}
+	c.On("DescribeWorkflowExecution", mock.Anything, "wf/plan", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
+		PendingActivities: []*workflow.PendingActivityInfo{{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: beat}},
+	}, nil)
+	none, _ := dc.ToPayloads(map[string]bool{})
+	c.On("QueryWorkflow", mock.Anything, "wf", "", loom.FormsQuery).Return(queryAnswer{none}, nil)
+	var out bytes.Buffer
+	if err := formsCommand(context.Background(), &out, c, "wf", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`the filled form: (\S+\.jpg)\n`).FindStringSubmatch(out.String())
+	if m == nil || !strings.Contains(out.String(), "Name Ada.") {
+		t.Fatalf("%s", out.String())
+	}
+	defer os.Remove(m[1])
+	if b, err := os.ReadFile(m[1]); err != nil || !bytes.Equal(b, jpeg) {
+		t.Errorf("screenshot file: %v %v", b, err)
+	}
+}
+
+// queryAnswer is a query's answer, as a Temporal client returns it.
+type queryAnswer struct{ p *common.Payloads }
+
+func (e queryAnswer) HasValue() bool { return e.p != nil }
+func (e queryAnswer) Get(v any) error {
+	return converter.GetDefaultDataConverter().FromPayloads(e.p, v)
 }

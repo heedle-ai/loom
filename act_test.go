@@ -71,7 +71,9 @@ func TestInv_WritersKnowAct(t *testing.T) {
 	if !ok || !strings.HasPrefix(c.Args, "(act ") {
 		t.Fatalf("act: %+v", c)
 	}
-	for _, want := range []string{"submits a form", "may reach only", "can't sign in", "say so in the summary"} {
+	// Roadmap 9.7, review 41: they're told it stops before sending, and
+	// never to opt out unless the request says so.
+	for _, want := range []string{"fills in a form", "stops before each send to ask", "may reach only", "can't sign in", "say so in the summary", "Never add :send-without-asking"} {
 		if !strings.Contains(c.About, want) {
 			t.Errorf("act's description lacks %q: %s", want, c.About)
 		}
@@ -107,7 +109,7 @@ func TestInv_MergeRerunsActOnlyWhenAllowed(t *testing.T) {
 	loom.Register(env, h.s, reg)
 	env.ExecuteWorkflow(loom.MergeWorkflowName, loom.MergeInput{Into: "refs/loom/a", From: "refs/loom/b", Resolve: loom.ResolveRerun})
 	err := env.GetWorkflowError()
-	if appErrType(err) != "InvalidInput" || !strings.Contains(err.Error(), "submit forms on forms.example.org") || h.head("refs/loom/a") != before {
+	if appErrType(err) != "InvalidInput" || !strings.Contains(err.Error(), "click and type on forms.example.org") || h.head("refs/loom/a") != before {
 		t.Fatalf("merge rerunning act: %v", err)
 	}
 	// Allowed: it goes on to re-run it (here, on a worker without act's
@@ -115,7 +117,22 @@ func TestInv_MergeRerunsActOnlyWhenAllowed(t *testing.T) {
 	env = suite.NewTestWorkflowEnvironment()
 	loom.Register(env, h.s, reg)
 	env.ExecuteWorkflow(loom.MergeWorkflowName, loom.MergeInput{Into: "refs/loom/a", From: "refs/loom/b", Resolve: loom.ResolveRerun, AllowAct: true})
-	if err := env.GetWorkflowError(); err == nil || strings.Contains(err.Error(), "submit forms") {
+	if err := env.GetWorkflowError(); err == nil || strings.Contains(err.Error(), "click and type") {
 		t.Fatalf("allowed: %v", err)
+	}
+	// One that sends without asking needs AllowSendFreely too (review 41).
+	free := `(act "Join as Ada" "https://forms.example.org/" :send-without-asking)`
+	fp := must(loom.Compile(ctx, reg, free))
+	for _, ref := range []string{"refs/loom/c", "refs/loom/d"} {
+		id, at := h.next()
+		if _, err := h.rec.Record(ctx, loom.RecordInput{Program: free, Plan: fp, Result: plan.Result{Outputs: map[string]string{"n0": ref}}, Ref: ref, WorkflowID: "wf-" + id, RunID: id, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env = suite.NewTestWorkflowEnvironment()
+	loom.Register(env, h.s, reg)
+	env.ExecuteWorkflow(loom.MergeWorkflowName, loom.MergeInput{Into: "refs/loom/c", From: "refs/loom/d", Resolve: loom.ResolveRerun, AllowAct: true})
+	if err := env.GetWorkflowError(); appErrType(err) != "InvalidInput" || !strings.Contains(err.Error(), "without asking again") {
+		t.Fatalf("merge rerunning act that sends without asking: %v", err)
 	}
 }

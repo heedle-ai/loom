@@ -104,6 +104,8 @@ func TestInv_NoticesAreToldOnce(t *testing.T) {
 	c.On("DescribeWorkflowExecution", mock.Anything, "loom-e/plan", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
 		PendingActivities: []*workflow.PendingActivityInfo{{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: beat}},
 	}, nil)
+	none, _ := dc.ToPayloads(map[string]bool{})
+	c.On("QueryWorkflow", mock.Anything, "loom-e", "", loom.FormsQuery).Return(encoded{none}, nil)
 
 	w := &loom.Watcher{Client: c, Queue: "loom", Since: now.Add(-5 * time.Minute)}
 	got, err := w.Check(ctx)
