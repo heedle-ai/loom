@@ -134,6 +134,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return secretCommand(ctx, out, fs.Arg(0), fs.Arg(1))
 
 	case "memory":
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if set["add"] && strings.TrimSpace(*add) == "" || set["forget"] && *forget == "" {
+			return errors.New("memory: -add takes the text to remember, and -forget the ID of a memory (heedle memory lists them)")
+		}
 		return memoryCommand(out, *memoryFile, *add, *forget, *forgetAll, fs.NArg())
 
 	case "worker":
@@ -1061,6 +1066,18 @@ func ActDisclosure(hosts []string) string {
 // it would run, and whether it can run now and, if not, what to set up.
 func printProposal(out io.Writer, p loom.Proposal) {
 	fmt.Fprintln(out, p.Summary)
+	// What heedle remembers went with the request; what it could remember
+	// is only suggested (roadmap 10.1; review 47: the terminal said
+	// neither).
+	if n := len(p.Memory); n > 0 {
+		fmt.Fprintf(out, "\nUsed %d thing%s heedle remembers (heedle memory lists them)\n", n, map[bool]string{true: "", false: "s"}[n == 1])
+	}
+	for _, r := range p.Remember {
+		fmt.Fprintf(out, "\nheedle could remember: %s\n  nothing is remembered until you say so: heedle memory -add %s\n", printable(r), shellWord(r))
+	}
+	if p.Program == "" && p.Skill == "" {
+		return // only something to remember
+	}
 	if p.Skill != "" {
 		fmt.Fprintf(out, "\nNo command or skill here can do that. A skill that could:\n  %s\nCreate it with: heedle skills -store DIR -create %q -agent-image ID (it waits for your review)\n", p.Skill, p.Skill)
 		return
@@ -1206,6 +1223,8 @@ func memoryCommand(out io.Writer, file, add, forget string, forgetAll bool, extr
 		return errors.New("memory takes one of -add TEXT, -forget ID and -forget-all, or nothing to list\n" + usage)
 	}
 	if file == "" {
+		// heedle up's, unless it was started with -home DIR: then give
+		// -memory DIR/memory.json (every line says which file it is).
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return errors.New("no home directory: give -memory FILE")
@@ -1233,14 +1252,17 @@ func memoryCommand(out io.Writer, file, add, forget string, forgetAll bool, extr
 		fmt.Fprintf(out, "forgot everything; %s is empty\n", file)
 		return nil
 	}
-	ms, err := loom.ReadMemory(file)
+	// As it is, so a memory edited by hand into one heedle won't send can
+	// be seen, with why, and forgotten (review 47).
+	ms, err := loom.ReadMemoryAsIs(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w (heedle memory -forget-all empties it)", err)
 	}
 	if len(ms) == 0 {
 		fmt.Fprintf(out, "heedle remembers nothing about you (%s)\n", file)
 		return nil
 	}
+	problems := ms.Problems()
 	fmt.Fprintf(out, "heedle remembers, and sends to Claude with every request (%s):\n", file)
 	for _, m := range ms {
 		used := "never used"
@@ -1248,6 +1270,12 @@ func memoryCommand(out io.Writer, file, add, forget string, forgetAll bool, extr
 			used = "used " + m.Used.Local().Format("2006-01-02")
 		}
 		fmt.Fprintf(out, "  %s  added %s, %s  %s\n", m.ID, m.Added.Local().Format("2006-01-02"), used, printable(m.Text))
+		if why := problems[m.ID]; why != "" {
+			fmt.Fprintf(out, "      can't go to Claude: %s; forget it with heedle memory -forget %s\n", why, m.ID)
+		}
+	}
+	if why := problems[""]; why != "" {
+		fmt.Fprintf(out, "  can't go to Claude: %s\n", why)
 	}
 	return nil
 }

@@ -56,6 +56,11 @@ type Turn struct {
 	Request string `json:"request"`
 	Summary string `json:"summary,omitempty"`
 	Program string `json:"program,omitempty"`
+	// Memory are the memories its proposal was made with (its
+	// Proposal.Memory). A turn made with one heedle no longer remembers is
+	// sent without its summary and program, which may repeat it (review
+	// 47: a forgotten memory came back through the conversation).
+	Memory []string `json:"memory,omitempty"`
 }
 
 // AskRequest is a request, with the conversation before it, and the day
@@ -176,7 +181,7 @@ const AskFormat = `Reply with only one JSON object, in a ` + "```json" + ` block
 - "timeZone": the IANA time zone for "cron" (the person's own, unless they name another); else "".
 - "name": when it repeats, a short name for the schedule: lower-case letters, digits and hyphens, such as "lisbon-weekly"; else "".
 - "skill": only when "program" is "" and the request asks for something to be done: what a new skill would do, its arguments, and the connectors it would need, in a few sentences; else "".
-- "remember": lasting facts or preferences about the person that the request states, such as "Prefers trains to planes." or "Home airport: IAD.", a short line each, for heedle to suggest remembering; never a wish for this request alone ("this trip I want tiles"), never something it already remembers, and never a key, password or card number; else []. When the request only asks heedle to remember something ("remember that ..."), give it here, with "program" and "skill" both "".
+- "remember": lasting facts or preferences about the person that the request states, such as "Prefers trains to planes." or "Home airport: IAD.", for heedle to suggest remembering: at most 5, each one short line of under 500 characters; never a wish for this request alone ("this trip I want tiles"), never something it already remembers, and never a key, password, card number or other secret; else []. Only the person can save them, so never say in "summary" that you have remembered anything. When the request only asks heedle to remember something ("remember that ..."), give it here, with "program" and "skill" both "", and say in "summary" what heedle could remember.
 Prefer a skill that fits over general commands. act submits forms on the hosts it names without asking again, so use it only when the request asks for a form to be filled in or sent; when the site needs the person to sign in, act can't, so say that in "summary". Fill a skill's or command's arguments from the request; write dates as YYYY-MM-DD, worked out from today.`
 
 var jsonFence = regexp.MustCompile("(?s)```(?:json)?\\s*\\n(.*?)```")
@@ -234,7 +239,7 @@ func repeatedKey(body string) string {
 // something to remember; anything to remember, as a memory would have to
 // be; and a schedule only with a program, given one way, sensibly, with a
 // name.
-func propose(ctx context.Context, reg *registry.Registry, a askAnswer, zone string) (Proposal, error) {
+func propose(ctx context.Context, reg *registry.Registry, a askAnswer, zone string, onlyRemember bool) (Proposal, error) {
 	p := Proposal{Summary: strings.TrimSpace(a.Summary), Program: strings.TrimSpace(a.Program), Skill: strings.TrimSpace(a.Skill)}
 	remember, err := suggestions(a.Remember)
 	if err != nil {
@@ -244,8 +249,9 @@ func propose(ctx context.Context, reg *registry.Registry, a askAnswer, zone stri
 	switch {
 	case p.Summary == "" || len(p.Summary) > MaxSummary:
 		return Proposal{}, fmt.Errorf("the summary is 1 to %d bytes", MaxSummary)
-	case p.Program == "" && p.Skill == "" && len(p.Remember) > 0:
-		// Only something to remember (roadmap 10.1).
+	case p.Program == "" && p.Skill == "" && len(p.Remember) > 0 && onlyRemember:
+		// Only something to remember, when that's all the request asks
+		// (roadmap 10.1; review 47: any request could become one).
 		if a.Every != "" || a.Cron != "" || a.Name != "" || a.TimeZone != "" {
 			return Proposal{}, errors.New("a schedule goes with a program")
 		}
@@ -317,6 +323,10 @@ func suggestions(in []string) ([]string, error) {
 	return out, nil
 }
 
+// rememberOnly is a request only to remember something: "remember that
+// ...", "please note ...".
+var rememberOnly = regexp.MustCompile(`(?i)^\s*(please[,\s]+)?(remember|note|keep in mind|don'?t forget)\b`)
+
 var isoDay = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // checkAsk refuses a request heedle can't take: empty or too long, more
@@ -331,6 +341,9 @@ func checkAsk(in AskRequest) error {
 	for _, t := range in.Earlier {
 		if len(t.Request) > MaxRequest || len(t.Summary) > MaxSummary || len(t.Program) > MaxTurnProgram {
 			return fmt.Errorf("%w: an earlier turn is too long", pirn.ErrInvalid)
+		}
+		if len(t.Memory) > MaxMemories || slices.ContainsFunc(t.Memory, func(id string) bool { return !memoryID.MatchString(id) }) {
+			return fmt.Errorf("%w: an earlier turn's memory isn't memory IDs", pirn.ErrInvalid)
 		}
 	}
 	if in.Today != "" {
@@ -365,26 +378,32 @@ func (w Writer) Ask(ctx context.Context, in AskRequest) (Proposal, error) {
 		return Proposal{}, err
 	}
 	sources := []pirn.Source{{ID: "language", Text: Language}, {ID: "commands", Text: listing(cmds)}}
+	// What the person asked heedle to remember, as a source after the
+	// conversation: what they said about themselves, never instructions
+	// (roadmap 10.1). It's read here, on the worker; the proposal names the
+	// memories sent by ID.
+	var memory Memories
+	if w.MemoryFile != "" {
+		if memory, err = ReadMemory(w.MemoryFile); err != nil {
+			return Proposal{}, fmt.Errorf("%w: heedle's memory has a problem to fix first (heedle memory, or the Memory page, lists it and can forget it): %v", pirn.ErrInvalid, err)
+		}
+	}
 	if len(in.Earlier) > 0 {
 		var conv strings.Builder
 		for i, t := range in.Earlier {
+			if slices.ContainsFunc(t.Memory, func(id string) bool { return !slices.Contains(memory.IDs(), id) }) {
+				// Made with something since forgotten: what it proposed may
+				// repeat it, so it's left out (review 47).
+				fmt.Fprintf(&conv, "Turn %d. Asked: %s\nProposed: (left out: it was made with something heedle no longer remembers)\n", i+1, t.Request)
+				continue
+			}
 			fmt.Fprintf(&conv, "Turn %d. Asked: %s\nProposed: %s\n%s\n", i+1, t.Request, t.Summary, t.Program)
 		}
 		sources = append(sources, pirn.Source{ID: "conversation", Text: conv.String()})
 	}
-	// What the person asked heedle to remember, after the conversation, as
-	// a source: what they said about themselves, never instructions
-	// (roadmap 10.1). It's read here, on the worker, so its text never
-	// enters Temporal's history: the proposal names only the IDs sent.
-	var memory Memories
-	if w.MemoryFile != "" {
-		if memory, err = ReadMemory(w.MemoryFile); err != nil {
-			return Proposal{}, fmt.Errorf("%w: heedle's memory file has a problem to fix first (heedle memory, or the memory page): %v", pirn.ErrInvalid, err)
-		}
-	}
 	if src, ok := memory.Source(); ok {
 		sources = append(sources, src)
-		defer MarkMemoryUsed(w.MemoryFile, memory.IDs(), time.Now()) // sent; a failure to note it changes nothing else
+		defer MarkMemoryUsed(w.MemoryFile, memory, time.Now()) // sent; a failure to note it changes nothing else
 	}
 	base := len(sources)
 	instruction := "You are heedle's front door: a person asks for something, and you propose how heedle will do it with the listed commands and skills" +
@@ -399,7 +418,7 @@ func (w Writer) Ask(ctx context.Context, in AskRequest) (Proposal, error) {
 		ans, err := parseAnswer(a.Text)
 		if err == nil {
 			var p Proposal
-			if p, err = propose(ctx, reg, ans, zone); err == nil {
+			if p, err = propose(ctx, reg, ans, zone, rememberOnly.MatchString(in.Request)); err == nil {
 				p.Attempts = attempt
 				p.Memory = memory.IDs()
 				if p.Plan != nil && w.Ready != nil {
