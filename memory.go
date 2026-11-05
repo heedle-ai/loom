@@ -122,8 +122,8 @@ func memoryProblem(text string) string {
 // symbol, and the tags of a flag after its black flag.
 func hiddenText(t string) bool {
 	rs := []rune(t)
-	flag := false
-	for i, r := range rs {
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
 		prev, next := rune(0), rune(0)
 		if i > 0 {
 			prev = rs[i-1]
@@ -133,13 +133,22 @@ func hiddenText(t string) bool {
 		}
 		switch {
 		case r == 0x1F3F4:
-			flag = true
-			continue
-		case r >= 0xE0020 && r <= 0xE007F && flag:
-			if r == 0xE007F {
-				flag = false
+			// A flag's tags, only as a flag has them: 2 to 7 lower-case
+			// letters or digits, then the cancel tag (review 47, round 3:
+			// any hidden text could follow the black flag).
+			n := 0
+			for i+1+n < len(rs) && (rs[i+1+n] >= 0xE0061 && rs[i+1+n] <= 0xE007A || rs[i+1+n] >= 0xE0030 && rs[i+1+n] <= 0xE0039) {
+				n++
+			}
+			if n > 0 {
+				if n < 2 || n > 7 || i+1+n >= len(rs) || rs[i+1+n] != 0xE007F {
+					return true
+				}
+				i += n + 1
 			}
 			continue
+		case (r == 0xFE0F || r == 0xFE0E) && next == 0x20E3 && (prev >= '0' && prev <= '9' || prev == '#' || prev == '*'):
+			continue // a keycap: 1️⃣
 		case r == 0x200D && (symbol(prev) || prev == 0xFE0F) && symbol(next):
 			continue
 		case r == 0x200C && unicode.IsLetter(prev) && unicode.IsLetter(next):
@@ -147,7 +156,6 @@ func hiddenText(t string) bool {
 		case (r == 0xFE0E || r == 0xFE0F) && (symbol(prev) || prev == 0x20E3):
 			continue
 		}
-		flag = false
 		if hidden(r) {
 			return true
 		}
@@ -626,6 +634,9 @@ var secretShapes = []struct {
 	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY`), "a private key"},
 	{regexp.MustCompile(`\b(sk-ant-|sk-proj-|sk-[A-Za-z0-9]{20}|(sk|rk|pk)_(live|test)_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AIza[0-9A-Za-z_-]{20}|(AKIA|ASIA)[0-9A-Z]{16}|npm_[A-Za-z0-9]{20})`), "an API key or token"},
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`), "a sign-in token"},
+	// A Wi-Fi password: "wifi pass: Fluffy123", "wifi key is …".
+	{regexp.MustCompile(`(?i)\b(wi-?fi|wlan|network)\s+(pass|key|code)\b\s*(is|:|=)?\s*\S`), "a password"},
+	{regexp.MustCompile(`(?i)\bpass\s*(is|:|=)\s*\S`), "a password"},
 	// A sign-in written out: someone@example.com / hunter2.
 	{regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+\s*[/:|]\s*\S`), "a password"},
 	{regexp.MustCompile(`(?i)\b(pin|cvv|cvc|security code)\s*(is|:|=)\s*\d{3,}`), "a PIN or card code"},
