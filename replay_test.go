@@ -119,6 +119,15 @@ func TestInv_ScriptIsTheProgramsLast(t *testing.T) {
 func TestInv_UsageSaysReplayed(t *testing.T) {
 	p := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: pirn.ActActivityName}, {ID: "n1", Activity: pirn.ActActivityName}, {ID: "n2", Activity: pirn.ActActivityName}}}
 	whole, part, none := &pirn.ActReplay{Steps: 3, Replayed: 3}, &pirn.ActReplay{Steps: 3, Replayed: 1, HandedOver: true, At: 2}, &pirn.ActReplay{Steps: 3, HandedOver: true, At: 1}
+	// Review 51: one a "no" cut short is part of a replay, not all of it.
+	cut := loom.UsageOf(plan.Plan{Nodes: p.Nodes[:1]}, map[string]string{"n0": func() string {
+		res := pirn.ActResult{Answer: pirn.Answer{Pirn: 1, Model: "claude-sonnet-5-5"}, Act: 1, Calls: []pirn.ActCall{}, Allowed: []string{}, Blocked: []string{}, Inputs: []string{}, Held: []string{},
+			Ended: pirn.EndedCancelled, Replay: &pirn.ActReplay{Steps: 4, Replayed: 2, At: 3, Why: "a send there wasn't confirmed"}}
+		return string(must(json.Marshal(res)))
+	}()})
+	if cut.Steps[0].Replayed != "part" {
+		t.Errorf("a replay cut short: %+v", cut.Steps[0])
+	}
 	out := func(r *pirn.ActReplay, tokens int64, turns int) string {
 		res := pirn.ActResult{Answer: pirn.Answer{Pirn: 1, Model: "claude-sonnet-5-5", InputTokens: tokens, OutputTokens: tokens}, Act: 1, Turns: turns, Calls: []pirn.ActCall{}, Allowed: []string{},
 			Blocked: []string{}, Inputs: []string{}, Held: []string{}, Ended: pirn.EndedFinished, Replay: r}
@@ -134,8 +143,8 @@ func TestInv_UsageSaysReplayed(t *testing.T) {
 // TestE2E_ScriptsFindTheRunsProgram: on a real Temporal server, an act
 // step finds its script through Temporal itself (loom.Scripts reads its
 // run's input from the run's history): the second run of a program finds
-// the first's, and a run of another program, with the same step at the
-// same node, finds none. CI's e2e job runs it with LOOM_E2E=1. (Roadmap
+// the first's, a run its schedule starts finds the last one's, and a run
+// of another program, with the same step at the same node, finds none. CI's e2e job runs it with LOOM_E2E=1. (Roadmap
 // 9.9.)
 func TestE2E_ScriptsFindTheRunsProgram(t *testing.T) {
 	if os.Getenv("LOOM_E2E") != "1" {
@@ -155,7 +164,7 @@ func TestE2E_ScriptsFindTheRunsProgram(t *testing.T) {
 	reg := actRegistry(t)
 	s := newStore(t)
 	w := worker.New(c, queue, worker.Options{})
-	loom.Register(w, s, reg)
+	loom.RegisterWith(w, &loom.Checker{Registry: reg}, &loom.Recorder{Store: s, Schedules: loom.TemporalSchedules{Client: c}})
 	scripts := loom.Scripts(c, s)
 	// A stand-in act step: it says what script it found, and keeps one.
 	w.RegisterActivityWithOptions(shuttle.ArrowAsActivity(func(ctx context.Context, in plan.Input) (string, error) {
@@ -188,10 +197,39 @@ func TestE2E_ScriptsFindTheRunsProgram(t *testing.T) {
 	}
 	a := `(act "Sign me up." "https://forms.example.org/a")`
 	first, firstRun := run(a)
-	second, _ := run(a)
+	second, secondRun := run(a)
 	other, _ := run(`(act "Sign me up." "https://forms.example.org/b")`)
 	if first != "none" || second != "from "+firstRun || other != "none" {
 		t.Errorf("first %q, second %q (want from %s), another program %q", first, second, firstRun, other)
+	}
+	// A run a schedule started (its workflow ID has the time Temporal
+	// adds) finds its program's last script too (review 51).
+	in := loom.RunInput{Program: a, Plan: must(loom.Compile(c0, reg, a))}
+	if err := loom.CreateSchedule(c0, c, queue, "replay", in, loom.ScheduleSpec{Cron: "0 0 1 1 *"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := loom.ScheduleAction(c0, c, "replay", "run"); err != nil {
+		t.Fatal(err)
+	}
+	h := c.ScheduleClient().GetHandle(c0, loom.SchedulePrefix+"replay")
+	for {
+		d, err := h.Describe(c0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Info.RecentActions) > 0 {
+			act := d.Info.RecentActions[0].StartWorkflowResult
+			var res loom.RunResult
+			if err := c.GetWorkflow(c0, act.WorkflowID, act.FirstExecutionRunID).Get(c0, &res); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := pirn.ParseAct(res.Outputs["n0"])
+			if !strings.HasPrefix(act.WorkflowID, must(loom.WorkflowID(c0, loom.RunInput{Program: a, Plan: in.Plan, Ref: loom.DefaultRef}))+"-") || got.Text != "from "+secondRun {
+				t.Errorf("a scheduled run %s found %q, want from %s", act.WorkflowID, got.Text, secondRun)
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	if _, ok, _ := s.Resolve(c0, loom.DefaultRef); !ok {
 		t.Error("nothing recorded")
