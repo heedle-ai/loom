@@ -166,7 +166,7 @@ loom memory -forget-all
 ```
 forgot m78fbf5839f81; it's gone from /home/you/.heedle/memory.json
 forgot everything; /home/you/.heedle/memory.json is empty
-## 6. See what runs cost
+## 7. See what runs cost
 
 Every Claude step's record has its model and tokens; `costs` adds up a month of them (this one by default), by schedule and model, with an estimate in dollars from the built-in prices ([Costs and budgets](How-It-Works#costs-and-budgets)). The worker keeps recording to the same store:
 
