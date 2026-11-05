@@ -201,7 +201,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		agent := pirn.Agent{Claude: claude, Runner: bobbin.Runner{}, Image: *agentImage, Registry: registryFor(*agentRegistry), Connectors: connectors, Vault: vault,
 			LoadConnectors: loadConnectors}
 		act := pirn.Act{Claude: claude, Browser: pirn.ReedBrowser{Browser: reed.Browser{Image: *browserAgentImage, Network: *browserNetwork}}, Image: *browserAgentImage,
-			Confirm: loom.Confirmer(c)} // a person confirms each send (roadmap 9.7)
+			Confirm: loom.Confirmer(c),  // a person confirms each send (roadmap 9.7)
+			Script:  loom.Scripts(c, s)} // the program's last script, replayed without Claude (roadmap 9.9)
 		reg, err := workerCommands(w, claude, agent, act, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err

@@ -91,3 +91,4 @@ jobs:
           grep -q -- '--- PASS: TestE2E_ARealServer' e2e.log
           grep -q -- '--- PASS: TestE2E_CancelStopsTheStep' e2e.log
           grep -q -- '--- PASS: TestE2E_BudgetPausesASchedule' e2e.log
+          grep -q -- '--- PASS: TestE2E_ScriptsFindTheRunsProgram' e2e.log
