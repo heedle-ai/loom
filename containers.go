@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.temporal.io/api/enums/v1"
+	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 
@@ -87,51 +88,76 @@ type Container struct {
 	// terminated, timed out; "unknown" when Temporal doesn't know it or
 	// can't be asked.
 	Status string `json:"status,omitempty"`
+	// Stoppable says Cancel would stop Workflow's run Run: Temporal says
+	// it is a run (RunWorkflow) and is still running (LOOM-502).
+	Stoppable bool `json:"stoppable"`
 }
 
 // Containers lists heedle's containers (bobbin's listing) with the run
 // each belongs to: Temporal describes the workflow its labels name, and a
-// plan workflow's run is its parent. Each workflow is asked about once.
+// plan workflow's run is its parent. Each execution is asked about once.
 func Containers(ctx context.Context, c client.Client, r bobbin.Runner) ([]Container, error) {
 	bs, err := r.Containers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	type key struct{ wf, run string }
-	known := map[key]Container{}
+	d := describer{ctx: ctx, c: c, known: map[[2]string]*workflowpb.WorkflowExecutionInfo{}}
+	known := map[[2]string]Container{}
 	out := make([]Container, 0, len(bs))
 	for _, b := range bs {
 		ct := Container{Container: b}
 		l := b.Labels
 		if l.Workflow != "" && l.Run != "" && c != nil {
-			k := key{l.Workflow, l.Run}
+			k := [2]string{l.Workflow, l.Run}
 			got, ok := known[k]
 			if !ok {
-				got = describeRun(ctx, c, l.Workflow, l.Run)
+				got = d.run(l.Workflow, l.Run)
 				known[k] = got
 			}
-			ct.Workflow, ct.Run, ct.Status = got.Workflow, got.Run, got.Status
+			ct.Workflow, ct.Run, ct.Status, ct.Stoppable = got.Workflow, got.Run, got.Status, got.Stoppable
 		}
 		out = append(out, ct)
 	}
 	return out, nil
 }
 
-// describeRun is the run a container labelled with workflow and run
-// belongs to: that execution, or for a plan workflow its parent, with the
-// labelled execution's status (the step's, which is what decides whether
-// its container is still needed).
-func describeRun(ctx context.Context, c client.Client, workflow, run string) Container {
+// describer asks Temporal about each execution once.
+type describer struct {
+	ctx   context.Context
+	c     client.Client
+	known map[[2]string]*workflowpb.WorkflowExecutionInfo // nil: couldn't say
+}
+
+func (d describer) info(workflow, run string) *workflowpb.WorkflowExecutionInfo {
+	k := [2]string{workflow, run}
+	if info, ok := d.known[k]; ok {
+		return info
+	}
+	var info *workflowpb.WorkflowExecutionInfo
+	if r, err := d.c.DescribeWorkflowExecution(d.ctx, workflow, run); err == nil {
+		info = r.GetWorkflowExecutionInfo()
+	}
+	d.known[k] = info
+	return info
+}
+
+// run is the run a container labelled with workflow and run belongs to:
+// that execution, or for a plan workflow its parent, with the labelled
+// execution's status (the step's, which is what decides whether its
+// container is still needed), and whether Cancel would stop the run.
+func (d describer) run(workflow, run string) Container {
 	ct := Container{Workflow: workflow, Run: run, Status: "unknown"}
-	d, err := c.DescribeWorkflowExecution(ctx, workflow, run)
-	if err != nil {
+	info := d.info(workflow, run)
+	if info == nil {
 		return ct
 	}
-	info := d.GetWorkflowExecutionInfo()
 	ct.Status = statusName(info.GetStatus())
+	owner := info
 	if p := info.GetParentExecution(); p != nil && info.GetType().GetName() == plan.WorkflowName {
 		ct.Workflow, ct.Run = p.GetWorkflowId(), p.GetRunId()
+		owner = d.info(ct.Workflow, ct.Run)
 	}
+	ct.Stoppable = owner.GetType().GetName() == RunWorkflowName && owner.GetStatus() == enums.WORKFLOW_EXECUTION_STATUS_RUNNING
 	return ct
 }
 
