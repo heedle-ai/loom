@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.temporal.io/sdk/testsuite"
+
+	"github.com/heedle-ai/draft"
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/pirn"
 	"github.com/heedle-ai/shuttle/plan"
@@ -75,5 +78,44 @@ func TestInv_WritersKnowAct(t *testing.T) {
 	}
 	if !strings.Contains(loom.AskFormat, "act can't, so say that") {
 		t.Error("the front door isn't told to say when act can't sign in")
+	}
+}
+
+// TestInv_MergeRerunsActOnlyWhenAllowed: merging with "rerun" runs each
+// conflicting question again, so one whose program has act steps would
+// submit its form again: the merge is refused, before anything runs,
+// unless AllowAct says the person allowed it. (Review 39.)
+func TestInv_MergeRerunsActOnlyWhenAllowed(t *testing.T) {
+	h := newHist(t)
+	reg := draft.DefaultRegistry()
+	reg.MustRegister(pirn.ActBuiltinSpec())
+	src := `(act "Join as Ada" "https://forms.example.org/")`
+	p := must(loom.Compile(ctx, reg, src))
+	answer := func(ref, out string) {
+		id, at := h.next()
+		if _, err := h.rec.Record(ctx, loom.RecordInput{Program: src, Plan: p, Result: plan.Result{Outputs: map[string]string{"n0": out}}, Ref: ref, WorkflowID: "wf-" + id, RunID: id, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	answer("refs/loom/a", "base")
+	h.branch("refs/loom/a", "refs/loom/b")
+	answer("refs/loom/a", "yes")
+	answer("refs/loom/b", "no")
+	before := h.head("refs/loom/a")
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	loom.Register(env, h.s, reg)
+	env.ExecuteWorkflow(loom.MergeWorkflowName, loom.MergeInput{Into: "refs/loom/a", From: "refs/loom/b", Resolve: loom.ResolveRerun})
+	err := env.GetWorkflowError()
+	if appErrType(err) != "InvalidInput" || !strings.Contains(err.Error(), "submit forms on forms.example.org") || h.head("refs/loom/a") != before {
+		t.Fatalf("merge rerunning act: %v", err)
+	}
+	// Allowed: it goes on to re-run it (here, on a worker without act's
+	// activity, which fails: nothing is merged).
+	env = suite.NewTestWorkflowEnvironment()
+	loom.Register(env, h.s, reg)
+	env.ExecuteWorkflow(loom.MergeWorkflowName, loom.MergeInput{Into: "refs/loom/a", From: "refs/loom/b", Resolve: loom.ResolveRerun, AllowAct: true})
+	if err := env.GetWorkflowError(); err == nil || strings.Contains(err.Error(), "submit forms") {
+		t.Fatalf("allowed: %v", err)
 	}
 }

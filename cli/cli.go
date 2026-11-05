@@ -47,19 +47,19 @@ import (
 
 const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE]
-  loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
+  loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
   loom skills  -store DIR -create "DESCRIPTION" -agent-image ID
   loom skills  -store DIR (-review NAME | -approve NAME@VERSION [-replacing VERSION] | -reject NAME@VERSION | -trust PREFIX | -untrust PREFIX | -trusted)
   loom branch  [-address HOST:PORT] [-queue NAME] -from REF -to REF
-  loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun]
+  loom merge   [-address HOST:PORT] [-queue NAME] -into REF -from REF [-resolve ours|theirs|rerun] [-allow-act]
   loom beliefs -store DIR [-ref REF]
   loom writes  [-address HOST:PORT] -workflow ID [-approve NODE/ID | -decline NODE/ID]
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
-  loom ask     [-address HOST:PORT] [-queue NAME] [-ref REF] [-then run|schedule] "WHAT YOU WANT DONE"
+  loom ask     [-address HOST:PORT] [-queue NAME] [-ref REF] [-then run|schedule] [-allow-act] "WHAT YOU WANT DONE"
   loom secret  (set NAME | delete NAME | delete --all)
-  loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] (PROGRAM | -f FILE)
+  loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
 `
 
@@ -112,6 +112,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
 	runNow := fs.String("run", "", "schedules: the schedule to run once now")
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
+	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -233,6 +234,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if err := actAllowed(p, *allowAct); err != nil {
+			return err
+		}
 		c, err := client.Dial(client.Options{HostPort: *address})
 		if err != nil {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
@@ -273,6 +277,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		p, err := loom.Compile(ctx, reg, src)
 		if err != nil {
+			return err
+		}
+		if err := actAllowed(p, *allowAct); err != nil {
 			return err
 		}
 		spec := loom.ScheduleSpec{Every: *every, Cron: *cron, TimeZone: *tz}
@@ -340,7 +347,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintf(out, "%s now at %s (from %s)\n", *to, head, *from)
 			return nil
 		}
-		wr, err := loom.SubmitMerge(ctx, c, *queue, loom.MergeInput{Into: *into, From: *from, Resolve: *resolve})
+		wr, err := loom.SubmitMerge(ctx, c, *queue, loom.MergeInput{Into: *into, From: *from, Resolve: *resolve, AllowAct: *allowAct})
 		if err != nil {
 			return err
 		}
@@ -372,7 +379,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		printProposal(out, p)
-		return askThen(ctx, out, c, *queue, *ref, *then, p)
+		return askThen(ctx, out, c, *queue, *ref, *then, *allowAct, p)
 
 	case "write":
 		if fs.NArg() != 1 {
@@ -1025,6 +1032,17 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 	}
 }
 
+// actAllowed refuses to run or schedule a plan with act steps unless the
+// person said -allow-act, saying what they would do: the card isn't the
+// only way in (review 39).
+func actAllowed(p plan.Plan, ok bool) error {
+	hosts := loom.ActHosts(p)
+	if len(hosts) == 0 || ok {
+		return nil
+	}
+	return fmt.Errorf("its act steps %s: give -allow-act to let them", ActDisclosure(hosts))
+}
+
 // ActDisclosure says what an act step may do without asking again, on
 // which hosts (roadmap 9.5): shown before a proposal runs.
 func ActDisclosure(hosts []string) string {
@@ -1107,7 +1125,7 @@ func readinessLines(r loom.Readiness) []string {
 
 // askThen does what -then says with a proposal: run it, or schedule it as
 // proposed; each only if the worker can run it now.
-func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, then string, p loom.Proposal) error {
+func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, then string, allowAct bool, p loom.Proposal) error {
 	if then == "" {
 		if p.Plan != nil {
 			fmt.Fprintln(out, "\nRun it with -then run"+map[bool]string{true: ", or schedule it with -then schedule", false: ""}[p.Schedule != nil]+".")
@@ -1123,6 +1141,9 @@ func askThen(ctx context.Context, out io.Writer, c client.Client, queue, ref, th
 		return errors.New("it can't run yet: set up what's missing above, then ask again")
 	case then == "schedule" && p.Schedule == nil:
 		return errors.New("the request doesn't say when to run it: ask again saying how often, or use -then run")
+	}
+	if err := actAllowed(*p.Plan, allowAct); err != nil {
+		return err
 	}
 	in := loom.RunInput{Program: p.Program, Plan: *p.Plan, Ref: ref}
 	if then == "schedule" {
