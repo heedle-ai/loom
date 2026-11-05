@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ import (
 )
 
 const usage = `usage:
-  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE] [-memory FILE]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
@@ -59,6 +60,7 @@ const usage = `usage:
   loom write   [-store DIR] "DESCRIPTION OF A TASK"
   loom ask     [-address HOST:PORT] [-queue NAME] [-ref REF] [-then run|schedule] [-allow-act] "WHAT YOU WANT DONE"
   loom secret  (set NAME | delete NAME | delete --all)
+  loom memory  [-memory FILE] [-add TEXT | -forget ID | -forget-all]
   loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
 `
@@ -87,7 +89,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	askModel := fs.String("ask-model", pirn.DefaultModel, "worker: the Claude model ask and agent use (key from ANTHROPIC_API_KEY, or the keychain: loom secret set ANTHROPIC_API_KEY)")
 	agentImage := fs.String("agent-image", "", "worker: content-pinned image ID agent steps run in (needs /bin/sh)")
 	imageRegistry := fs.String("image-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-images) that (image … \"push\") pushes to, with the worker's podman login")
-	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store, or - for a SKILL.md on standard input")
+	add := fs.String("add", "", "skills: a skill's folder (with SKILL.md) to add to the store, or - for a SKILL.md on standard input; memory: something for heedle to remember about you")
 	importSkill := fs.String("import", "", "skills: a GitHub link to a skill's folder, or an https:// or file:// repository (with -path and -branch), to import")
 	catalog := fs.String("catalog", "", "skills: a GitHub repository link, or an https:// or file:// repository, whose skills to list")
 	skillPath := fs.String("path", "", "skills: with -import of a repository URL, the skill's folder in it")
@@ -114,6 +116,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	allowAct := fs.Bool("allow-act", false, "run, schedule, ask -then, merge -resolve rerun: let the program's act steps click, type and submit forms on the hosts they name without asking again")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
+	memoryFile := fs.String("memory", "", "worker, memory: the file of what heedle remembers about you, which goes to Claude with every request to the front door (memory: default ~/.heedle/memory.json, heedle up's)")
+	forget := fs.String("forget", "", "memory: the ID of a memory to forget, as loom memory lists it")
+	forgetAll := fs.Bool("forget-all", false, "memory: forget everything heedle remembers")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -127,6 +132,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return deleteAllSecrets(ctx, out)
 		}
 		return secretCommand(ctx, out, fs.Arg(0), fs.Arg(1))
+
+	case "memory":
+		return memoryCommand(out, *memoryFile, *add, *forget, *forgetAll, fs.NArg())
 
 	case "worker":
 		if *store == "" {
@@ -195,7 +203,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				return loom.Readiness{}, err
 			}
 			return loom.CheckReady(ctx, p, lib, loom.Worker{Connectors: cs, Keys: agent.Vault, Agents: agent.Image != "", Browsers: *browserImage != "", BrowserAgents: *browserAgentImage != ""})
-		}}
+		}, MemoryFile: *memoryFile}
 		loom.RegisterWriter(w, writer)
 		loom.RegisterAsk(w, writer)
 		fmt.Fprintf(out, "worker on queue %q, recording to %s\n", *queue, s.Dir())
@@ -1181,4 +1189,65 @@ func localZone() string {
 		}
 	}
 	return ""
+}
+
+// memoryCommand lists what heedle remembers (in file, or heedle up's),
+// or adds, forgets or forgets all of it (roadmap 10.1). What you add from
+// the terminal is your own yes; what Claude suggests is added only when
+// you press Remember.
+func memoryCommand(out io.Writer, file, add, forget string, forgetAll bool, extra int) error {
+	ops := 0
+	for _, on := range []bool{add != "", forget != "", forgetAll} {
+		if on {
+			ops++
+		}
+	}
+	if ops > 1 || extra > 0 {
+		return errors.New("memory takes one of -add TEXT, -forget ID and -forget-all, or nothing to list\n" + usage)
+	}
+	if file == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return errors.New("no home directory: give -memory FILE")
+		}
+		file = filepath.Join(home, ".heedle", "memory.json")
+	}
+	switch {
+	case add != "":
+		m, err := loom.AddMemory(file, "", add, time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "remembered %s: %s\n", m.ID, printable(m.Text))
+		return nil
+	case forget != "":
+		if _, err := loom.ForgetMemory(file, "", forget); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "forgot %s; it's gone from %s\n", forget, file)
+		return nil
+	case forgetAll:
+		if _, err := loom.ForgetAllMemory(file, ""); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "forgot everything; %s is empty\n", file)
+		return nil
+	}
+	ms, err := loom.ReadMemory(file)
+	if err != nil {
+		return err
+	}
+	if len(ms) == 0 {
+		fmt.Fprintf(out, "heedle remembers nothing about you (%s)\n", file)
+		return nil
+	}
+	fmt.Fprintf(out, "heedle remembers, and sends to Claude with every request (%s):\n", file)
+	for _, m := range ms {
+		used := "never used"
+		if !m.Used.IsZero() {
+			used = "used " + m.Used.Local().Format("2006-01-02")
+		}
+		fmt.Fprintf(out, "  %s  added %s, %s  %s\n", m.ID, m.Added.Local().Format("2006-01-02"), used, printable(m.Text))
+	}
+	return nil
 }
