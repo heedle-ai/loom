@@ -131,7 +131,8 @@ type Schedule struct {
 	Ref     string        `json:"ref"`
 	Spec    ScheduleSpec  `json:"spec"`
 	Paused  bool          `json:"paused"`
-	Note    string        `json:"note,omitempty"` // why it's paused, such as a run that failed
+	Note    string        `json:"note,omitempty"`   // why it's paused, such as a run that failed
+	Budget  *Budget       `json:"budget,omitempty"` // its monthly budget, if any (budget.go)
 	Next    []time.Time   `json:"next"`
 	Recent  []ScheduleRun `json:"recent"`
 }
@@ -246,6 +247,11 @@ func Schedules(ctx context.Context, c client.Client, taskQueue string) ([]Schedu
 		}
 		if queue != taskQueue {
 			continue
+		}
+		if b, err := (TemporalSchedules{Client: c}).Budget(ctx, s.Name); err == nil && b.Budget.USD > 0 {
+			s.Budget = &b.Budget
+		} else if err != nil && !errors.Is(err, ErrNoSchedule) {
+			return nil, err
 		}
 		for _, a := range e.RecentActions {
 			if a.StartWorkflowResult != nil {
