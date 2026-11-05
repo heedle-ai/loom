@@ -42,12 +42,13 @@ Notation: `f ; g` is f then g (`pipe`, `Compose`); `f ⊗ g` is f and g side by 
 | 17 | **Ready is a meet:** for a fixed worker, ready(f ; g) = ready(f) ∧ ready(g) = ready(f ⊗ g). The front door's verdict on a whole proposal is the conjunction of its steps', and adding a step never makes a plan readier | loom `TestLaw_ReadyIsAMeet` (300 random programs, four workers) |
 | 18 | **Ask adds nothing to compilation:** a proposal's plan is exactly what its program compiles to, so the graph the card draws, and what Run submits and the worker recompiles (law 11), are one plan | loom `TestLaw_ProposalsCompileAsRunsDo` |
 | 19 | **A schedule's run is a run:** each run a schedule starts is `RunWorkflow` with the same input `Submit` would give it, so laws 3 to 15 hold for scheduled runs too | loom `TestInv_SchedulesStartRunsLikeSubmit` |
+| 20 | **Forgetting is never having had:** asking with a memory M and then forgetting it leaves the next question (its instruction and every source) exactly as it would be had M never been remembered, whatever else is remembered. Memory reaches Claude only as the `memory` source, and the instruction never depends on it | loom `TestLaw_ForgettingIsNeverHavingHad` (50 random memory sets) |
 
 ## The front door
 
 [[/images/front-door.svg|alt=String diagram of the front door: propose = ask ; check ; compile ; Δ ; (id ⊗ (needs ; ready)); nothing runs]]
 
-Asking heedle is outside the run: it proposes, and Run is the ordinary run of the proposed program (laws 18, 11). Claude's part is the only arrow that isn't a function of its input; everything after it is checked and computed by loom, and what the proposal needs is computed from the plan, never taken from Claude (laws 16, 17).
+Asking heedle is outside the run: it proposes, and Run is the ordinary run of the proposed program (laws 18, 11). Claude's part is the only arrow that isn't a function of its input; everything after it is checked and computed by loom, and what the proposal needs is computed from the plan, never taken from Claude (laws 16, 17). What heedle remembers about you is one of Claude's sources, never its instruction, and forgetting it leaves no trace in the next question (law 20).
 
 ## Where the guarantees stop
 
