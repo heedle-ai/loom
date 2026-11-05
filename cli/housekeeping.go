@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -36,16 +37,32 @@ func cancelCommand(ctx context.Context, out io.Writer, c client.Client, workflow
 	return nil
 }
 
-// containersCommand lists heedle's containers with their runs, or stops
-// one run (-stop) through Temporal, or removes the containers of runs that
-// have ended (-clean).
-func containersCommand(ctx context.Context, out io.Writer, c client.Client, stop string, clean bool) error {
+// containersArgs are the containers command's flags.
+type containersArgs struct {
+	stop, run string // -stop WORKFLOW and -run RUN
+	store     string // -store: the home whose containers -clean may remove
+	clean     bool
+}
+
+// containersCommand lists heedle's containers with their runs and homes,
+// or stops one run (-stop, with -run) through Temporal, or removes the
+// containers of runs that have ended (-clean; with -store, only that
+// home's).
+func containersCommand(ctx context.Context, out io.Writer, c client.Client, a containersArgs) error {
 	r := bobbin.Runner{}
+	home := ""
+	if a.store != "" {
+		home = bobbin.HomeOf(a.store)
+	}
 	switch {
-	case stop != "":
-		return cancelCommand(ctx, out, c, stop, "")
-	case clean:
-		gone, err := loom.Clean(ctx, c, r)
+	case a.stop != "":
+		run, err := stopRun(ctx, c, r, home, a.stop, a.run)
+		if err != nil {
+			return err
+		}
+		return cancelCommand(ctx, out, c, a.stop, run)
+	case a.clean:
+		gone, err := loom.Clean(ctx, c, r, home)
 		if err != nil {
 			return err
 		}
@@ -55,7 +72,7 @@ func containersCommand(ctx context.Context, out io.Writer, c client.Client, stop
 		}
 		fmt.Fprintf(out, "Removed %d container%s of runs that have ended:\n", len(gone), plural(len(gone)))
 		for _, ct := range gone {
-			fmt.Fprintf(out, "  %s  %s, step %s of run %s (%s)\n", ct.Name, ct.Labels.Kind, orDash(ct.Labels.Step), ct.Workflow, ct.Status)
+			fmt.Fprintf(out, "  %s  %s, step %s of run %s %s (%s)\n", ct.Name, ct.Labels.Kind, orDash(ct.Labels.Step), ct.Workflow, ct.Run, ct.Status)
 		}
 		return nil
 	}
@@ -63,19 +80,53 @@ func containersCommand(ctx context.Context, out io.Writer, c client.Client, stop
 	if err != nil {
 		return err
 	}
+	if home != "" {
+		fmt.Fprintf(out, "This home is %s (%s).\n", home, a.store)
+	}
 	if len(cs) == 0 {
 		fmt.Fprintln(out, "No heedle containers.")
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "KIND\tRUN\tSTATUS\tSTEP\tAGE\tIMAGE\tCPU\tMEMORY")
+	fmt.Fprintln(tw, "KIND\tHOME\tWORKFLOW\tRUN\tSTATUS\tSTEP\tAGE\tIMAGE\tCPU\tMEMORY")
 	for _, ct := range cs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ct.Labels.Kind, orDash(ct.Workflow), orDash(ct.Status), orDash(ct.Labels.Step),
+		h := orDash(ct.Labels.Home)
+		if home != "" && ct.Labels.Home == home {
+			h += " (this)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ct.Labels.Kind, h, orDash(ct.Workflow), orDash(ct.Run), orDash(ct.Status), orDash(ct.Labels.Step),
 			age(ct.Created), short(ct.Image, 48), orDash(ct.CPU), orDash(ct.Memory))
 	}
 	tw.Flush()
-	fmt.Fprintln(out, "Stop a run with: heedle containers -stop RUN (it's cancelled through Temporal); remove the containers of ended runs with -clean.")
+	fmt.Fprintln(out, "Stop a run with: heedle containers -stop WORKFLOW -run RUN (it's cancelled through Temporal); remove the containers of ended runs with -clean.")
 	return nil
+}
+
+// stopRun is the run ID -stop WORKFLOW cancels: -run's, else the one run
+// of workflow that heedle's containers here belong to (of home's, with a
+// home), never Temporal's latest run of that workflow (roadmap 9.2.1,
+// LOOM-521). With no such container, or several runs, it asks for -run.
+func stopRun(ctx context.Context, c client.Client, r bobbin.Runner, home, workflow, run string) (string, error) {
+	if run != "" {
+		return run, nil
+	}
+	cs, err := loom.Containers(ctx, c, r)
+	if err != nil {
+		return "", err
+	}
+	var runs []string
+	for _, ct := range cs {
+		if ct.Workflow == workflow && ct.Run != "" && loom.OfHome(ct.Labels, home) && !slices.Contains(runs, ct.Run) {
+			runs = append(runs, ct.Run)
+		}
+	}
+	switch len(runs) {
+	case 1:
+		return runs[0], nil
+	case 0:
+		return "", fmt.Errorf("no heedle container here belongs to a run of %s; give its run ID with -run RUN (heedle containers lists them)", workflow)
+	}
+	return "", fmt.Errorf("heedle's containers belong to %d runs of %s (%s); say which with -run RUN", len(runs), workflow, strings.Join(runs, ", "))
 }
 
 // imagesCommand lists heedle's images, marking those kept, or removes the

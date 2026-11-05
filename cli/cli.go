@@ -68,7 +68,7 @@ const usage = `usage:
   loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME]
   loom cancel     [-address HOST:PORT] WORKFLOW [RUN]
-  loom containers [-address HOST:PORT] [-stop WORKFLOW | -clean]
+  loom containers [-address HOST:PORT] [-store DIR] [-stop WORKFLOW [-run RUN] | -clean]
   loom images     [-keep REF ...] [-prune]
   loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-budget USD [-resume-next-month]] [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME | -name NAME -budget USD [-resume-next-month]]
@@ -126,7 +126,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	pauseFlag := fs.String("pause", "", "schedules: the schedule to pause")
 	resumeFlag := fs.String("resume", "", "schedules: the schedule to resume")
 	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
-	runNow := fs.String("run", "", "schedules: the schedule to run once now")
+	runNow := fs.String("run", "", "schedules: the schedule to run once now; containers -stop: the run ID to stop (default: the one run of WORKFLOW with containers here)")
 	then := fs.String("then", "", "ask: run the proposal now (run), or schedule it as proposed (schedule), if the worker can run it")
 	sendForm := fs.String("send", "", "forms: the ID of a form waiting to be sent, to send it")
 	cancelForm := fs.String("cancel", "", "forms: the ID of a form waiting to be sent, to cancel it (nothing is sent)")
@@ -134,8 +134,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	allowFreely := fs.Bool("allow-send-without-asking", false, "with -allow-act: also let act steps whose program says :send-without-asking submit forms without asking (roadmap 9.7)")
 	repoDir := fs.String("repo", "", "skills publish: a clone of your repository to publish the skill into, at skills/NAME (it commits; you push)")
 	agentRegistry := fs.String("agent-registry", "", "worker: OCI repository (such as ghcr.io/acme/heedle-files) for agent files too big for the record, pushed with oras")
-	stopRun := fs.String("stop", "", "containers: the run (its workflow ID) to stop, through Temporal")
-	clean := fs.Bool("clean", false, "containers: remove heedle's containers whose run has ended")
+	stopRun := fs.String("stop", "", "containers: the run (its workflow ID, and -run its run ID) to stop, through Temporal")
+	clean := fs.Bool("clean", false, "containers: remove heedle's containers whose run has ended (with -store, only that home's)")
 	prune := fs.Bool("prune", false, "images: remove heedle's images that aren't kept (-keep) and that no container uses")
 	var keep refs
 	fs.Var(&keep, "keep", "images: an image to keep (repo@sha256:…), as many times as needed")
@@ -177,7 +177,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
 		}
 		defer c.Close()
-		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{}))
+		// Every container a step starts says this store's home (roadmap
+		// 9.2.1, LOOM-520).
+		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store)}))
 		// The key and the connectors are read again for every step, so a key
 		// stored or a connector added while the worker runs needs no restart.
 		if _, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY"); err != nil {
@@ -480,8 +482,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return cancelCommand(ctx, out, c, fs.Arg(0), fs.Arg(1))
 
 	case "containers":
-		if fs.NArg() != 0 || *stopRun != "" && *clean {
-			return errors.New("containers takes at most one of -stop WORKFLOW or -clean\n" + usage)
+		if fs.NArg() != 0 || *stopRun != "" && *clean || *runNow != "" && *stopRun == "" {
+			return errors.New("containers takes at most one of -stop WORKFLOW [-run RUN] or -clean\n" + usage)
 		}
 		// The listing works without Temporal (runs show as unknown);
 		// stopping and cleaning need it.
@@ -490,7 +492,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		defer c.Close()
-		return containersCommand(ctx, out, c, *stopRun, *clean)
+		return containersCommand(ctx, out, c, containersArgs{stop: *stopRun, run: *runNow, store: *store, clean: *clean})
 
 	case "images":
 		if fs.NArg() != 0 {

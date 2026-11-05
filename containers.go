@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/heedle-ai/bobbin"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle/plan"
 )
 
@@ -43,6 +44,17 @@ func (l labelled) RegisterActivityWithOptions(a any, o activity.RegisterOptions)
 		}
 	}
 	l.w.RegisterActivityWithOptions(a, o)
+}
+
+// WorkerContext is the context a worker on store starts all its
+// activities from (Temporal's BackgroundActivityContext): it carries the
+// store's home (bobbin.HomeOf), so every container any step starts, a
+// skill's creation and a connector's included, is labelled heedle.home
+// with it, through bobbin and reed alike (roadmap 9.2.1). Two homes
+// running at once then each tidy only their own containers.
+func WorkerContext(store string) context.Context {
+	home := bobbin.HomeOf(store)
+	return reed.WithHome(bobbin.WithHome(context.Background(), home), home)
 }
 
 // ErrNotARun is a workflow loom won't cancel: one that isn't a run.
@@ -165,8 +177,12 @@ func (d describer) run(workflow, run string) Container {
 // the workflow their labels name has closed. A container whose run is
 // still running, unknown to Temporal (another Temporal's, perhaps) or not
 // labelled with a run is left, so it can never remove one still in use.
-// Without Temporal it removes nothing. It returns what it removed.
-func Clean(ctx context.Context, c client.Client, r bobbin.Runner) ([]Container, error) {
+// With a home (bobbin.HomeOf a store), it removes only that home's
+// containers and those with no home label, from before roadmap 9.2.1,
+// whose run this Temporal says has ended; another home's are never
+// touched. Without Temporal it removes nothing. It returns what it
+// removed.
+func Clean(ctx context.Context, c client.Client, r bobbin.Runner, home string) ([]Container, error) {
 	if c == nil {
 		return nil, errors.New("loom: cleaning up needs Temporal, to know which runs have ended")
 	}
@@ -179,6 +195,9 @@ func Clean(ctx context.Context, c client.Client, r bobbin.Runner) ([]Container, 
 	}
 	ended := map[string]Container{}
 	for _, ct := range cs {
+		if !OfHome(ct.Labels, home) {
+			continue
+		}
 		if ct.Status != "" && ct.Status != "running" && ct.Status != "unknown" {
 			ended[ct.ID] = ct
 		}
@@ -192,4 +211,11 @@ func Clean(ctx context.Context, c client.Client, r bobbin.Runner) ([]Container, 
 		out = append(out, ended[b.ID])
 	}
 	return out, err
+}
+
+// OfHome reports whether a container labelled l may be tidied for home:
+// it is home's, or has no home label (from before roadmap 9.2.1). Every
+// container may be when home is empty (a caller that names no home).
+func OfHome(l bobbin.Labels, home string) bool {
+	return home == "" || l.Home == home || l.Home == ""
 }

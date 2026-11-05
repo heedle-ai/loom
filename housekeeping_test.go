@@ -22,11 +22,13 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/heedle-ai/bobbin"
 	"github.com/heedle-ai/draft"
 	"github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/loom"
+	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle"
 	"github.com/heedle-ai/shuttle/plan"
 )
@@ -278,7 +280,7 @@ func TestInv_ContainersShowTheirRuns(t *testing.T) {
 // stay; with Temporal down it removes nothing (LOOM-503).
 func TestInv_CleanRemovesOnlyEndedRuns(t *testing.T) {
 	r, log := containerPodman(t, ps)
-	gone, err := loom.Clean(ctx, temporalWithRuns(), r)
+	gone, err := loom.Clean(ctx, temporalWithRuns(), r, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,13 +299,105 @@ func TestInv_CleanRemovesOnlyEndedRuns(t *testing.T) {
 	r, log = containerPodman(t, ps)
 	down := temporalWithRuns()
 	down.down = true
-	if _, err := loom.Clean(ctx, down, r); err == nil {
+	if _, err := loom.Clean(ctx, down, r, ""); err == nil {
 		t.Error("Clean with Temporal down succeeded")
 	}
 	if b, _ := os.ReadFile(log); strings.Contains(string(b), "rm") {
 		t.Errorf("Clean with Temporal down ran podman:\n%s", b)
 	}
-	if _, err := loom.Clean(ctx, nil, r); err == nil {
+	if _, err := loom.Clean(ctx, nil, r, ""); err == nil {
 		t.Error("Clean without Temporal succeeded")
+	}
+}
+
+// TestInv_WorkersSayTheirHome: a worker's activities start from
+// WorkerContext(store), which carries the store's home for bobbin and reed
+// alike, so every container a step starts says its home; and the worker
+// command uses it (LOOM-520, roadmap 9.2.1).
+func TestInv_WorkersSayTheirHome(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "store.git")
+	wctx := loom.WorkerContext(store)
+	home := bobbin.HomeOf(store)
+	if !bobbin.ValidHome(home) || bobbin.HomeFrom(wctx) != home || reed.HomeFrom(wctx) != home || wctx.Err() != nil {
+		t.Fatalf("WorkerContext: bobbin %q, reed %q, want %q", bobbin.HomeFrom(wctx), reed.HomeFrom(wctx), home)
+	}
+	if bobbin.HomeOf(filepath.Join(t.TempDir(), "store.git")) == home {
+		t.Error("two stores share a home")
+	}
+	// A step under a worker so made labels its containers with the home.
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestActivityEnvironment()
+	env.SetWorkerOptions(worker.Options{BackgroundActivityContext: wctx})
+	step := shuttle.ArrowAsActivity(func(ctx context.Context, in plan.Input) (string, error) {
+		b, err := json.Marshal(bobbin.LabelsFrom(ctx))
+		return string(b), err
+	})
+	loom.Labelled(env).RegisterActivityWithOptions(step, activity.RegisterOptions{Name: "Step"})
+	v, err := env.ExecuteActivity("Step", plan.Input{NodeID: "n4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out string
+	v.Get(&out)
+	var l bobbin.Labels
+	json.Unmarshal([]byte(out), &l)
+	if l.Home != home || l.Step != "n4" {
+		t.Errorf("a step's labels under the worker: %+v", l)
+	}
+	src, err := os.ReadFile("cli/cli.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(src), "worker.New(") != 1 || !strings.Contains(string(src), "worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store)}))") {
+		t.Error("cli.go's worker doesn't start its activities from loom.WorkerContext(*store)")
+	}
+}
+
+// homePS lists containers of two homes and one from before homes.
+const (
+	homeA  = "aaaaaaaaaaaa"
+	homeB  = "bbbbbbbbbbbb"
+	idA    = "a000000000000000000000000000000000000000000000000000000000000001"
+	idB    = "b000000000000000000000000000000000000000000000000000000000000002"
+	idOld  = "c000000000000000000000000000000000000000000000000000000000000003"
+	idBad  = "d000000000000000000000000000000000000000000000000000000000000004"
+	idARun = "e000000000000000000000000000000000000000000000000000000000000005"
+	homePS = `[{"Id":"` + idA + `","Names":["a"],"State":"exited","Created":1,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-b/plan","heedle.run":"p2","heedle.step":"n1","heedle.home":"` + homeA + `"}},
+ {"Id":"` + idB + `","Names":["b"],"State":"exited","Created":2,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-b/plan","heedle.run":"p2","heedle.step":"n1","heedle.home":"` + homeB + `"}},
+ {"Id":"` + idOld + `","Names":["c"],"State":"exited","Created":3,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-b/plan","heedle.run":"p2","heedle.step":"n1"}},
+ {"Id":"` + idBad + `","Names":["d"],"State":"exited","Created":4,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-b/plan","heedle.run":"p2","heedle.step":"n1","heedle.home":"--x"}},
+ {"Id":"` + idARun + `","Names":["e"],"State":"running","Created":5,"Labels":{"heedle.kind":"agent","heedle.workflow":"loom-a/plan","heedle.run":"p1","heedle.step":"n0","heedle.home":"` + homeA + `"}}]`
+)
+
+// TestInv_CleanTouchesOnlyItsHome: Clean for a home removes the ended
+// runs' containers of that home and those with no home label, never
+// another home's or one whose home label isn't one, and never a running
+// run's; with no home it is as before (LOOM-522, roadmap 9.2.1).
+func TestInv_CleanTouchesOnlyItsHome(t *testing.T) {
+	r, log := containerPodman(t, homePS)
+	gone, err := loom.Clean(ctx, temporalWithRuns(), r, homeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, g := range gone {
+		ids = append(ids, g.ID)
+	}
+	if strings.Join(ids, " ") != idA+" "+idOld {
+		t.Errorf("Clean for home A removed %q", ids)
+	}
+	b, _ := os.ReadFile(log)
+	if !strings.Contains(string(b), "rm --force --time 0 --ignore "+idA+" "+idOld+"\n") || strings.Contains(string(b), idB) || strings.Contains(string(b), idBad) {
+		t.Errorf("podman calls:\n%s", b)
+	}
+	for _, c := range []struct {
+		l    bobbin.Labels
+		home string
+		ok   bool
+	}{{bobbin.Labels{Home: homeA}, homeA, true}, {bobbin.Labels{}, homeA, true}, {bobbin.Labels{Home: homeB}, homeA, false},
+		{bobbin.Labels{Home: bobbin.InvalidHome}, homeA, false}, {bobbin.Labels{Home: homeB}, "", true}} {
+		if loom.OfHome(c.l, c.home) != c.ok {
+			t.Errorf("OfHome(%+v, %q) = %v", c.l, c.home, !c.ok)
+		}
 	}
 }
