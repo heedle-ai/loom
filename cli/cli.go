@@ -48,6 +48,7 @@ import (
 
 const usage = `usage:
   loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE] [-memory FILE]
+  loom worker  -store DIR [-address HOST:PORT] [-queue NAME] [-browser-image ID] [-browser-agent-image ID] [-browser-network NAME] [-ask-model MODEL] [-agent-image ID] [-agent-registry REPO] [-image-registry REPO] [-connectors FILE] [-prices FILE]
   loom run     [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
   loom compile [-store DIR] (PROGRAM | -f FILE)
   loom skills  -store DIR [-add FOLDER | -add - | -import LINK [-path P] [-branch B] | -catalog LINK [-branch B]]
@@ -66,6 +67,9 @@ const usage = `usage:
   loom cancel     [-address HOST:PORT] WORKFLOW [RUN]
   loom containers [-address HOST:PORT] [-stop WORKFLOW | -clean]
   loom images     [-keep REF ...] [-prune]
+  loom schedule  -name NAME (-every DURATION | -cron "M H DOM MON DOW" [-tz ZONE]) [-budget USD [-resume-next-month]] [-address HOST:PORT] [-queue NAME] [-ref REF] [-store DIR] [-allow-act] (PROGRAM | -f FILE)
+  loom schedules [-address HOST:PORT] [-pause NAME | -resume NAME | -delete NAME | -run NAME | -name NAME -budget USD [-resume-next-month]]
+  loom costs   -store DIR [-month YYYY-MM] [-tz ZONE] [-prices FILE]
 `
 
 // Run runs one loom command: args are the command's name and its
@@ -111,7 +115,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	scheduleNameFlag := fs.String("name", "", "schedule: the schedule's name (lower-case letters, digits and hyphens)")
 	every := fs.Duration("every", 0, "schedule: run every so often, such as 1h or 24h (at least 1m)")
 	cron := fs.String("cron", "", `schedule: run at cron times instead, five fields, such as "0 9 * * 1-5"`)
-	tz := fs.String("tz", "", "schedule: the time zone cron times are in, such as Europe/Lisbon (default UTC)")
+	tz := fs.String("tz", "", "schedule: the time zone cron times are in, such as Europe/Lisbon (default UTC); costs: the time zone months are in (default UTC)")
+	budget := fs.String("budget", "", "schedule, schedules -name: the schedule's monthly budget in USD, such as 5 (0: none); at or over it, estimated, a run starts nothing and pauses the schedule")
+	resumeNextMonth := fs.Bool("resume-next-month", false, "schedule, schedules -name with -budget: a new month resumes the schedule if its budget paused it")
+	pricesFile := fs.String("prices", defaultPrices(), "worker, costs: your prices file, overriding the built-in prices model by model (USD per million tokens)")
+	month := fs.String("month", "", "costs: the month to add up, such as 2026-11 (default: this month)")
 	pauseFlag := fs.String("pause", "", "schedules: the schedule to pause")
 	resumeFlag := fs.String("resume", "", "schedules: the schedule to resume")
 	deleteFlag := fs.String("delete", "", "schedules: the schedule to delete (its runs' records stay)")
@@ -200,7 +208,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		warnSkipped(skipped)
 		loom.RegisterWith(w, &loom.Checker{Registry: reg, RegistryFor: func(ctx context.Context, p plan.Plan) (*draftregistry.Registry, error) {
 			return lib.Pinned(ctx, registry(), p)
-		}}, &loom.Recorder{Store: s, Uses: lib.Uses})
+		}}, &loom.Recorder{Store: s, Uses: lib.Uses, Schedules: loom.TemporalSchedules{Client: c}, PricesFile: *pricesFile})
+		if _, err := loom.ReadPrices(*pricesFile); err != nil {
+			fmt.Fprintln(out, err)
+		}
 		// Skills change only through a workflow on this worker (drawdown never
 		// writes), never through a program.
 		loom.RegisterSkills(w, loom.Skills{Library: lib, Create: creator(agent)})
@@ -305,6 +316,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		spec := loom.ScheduleSpec{Every: *every, Cron: *cron, TimeZone: *tz}
 		in := loom.RunInput{Program: src, Plan: p, Ref: *ref}
+		b, err := budgetFlags(*budget, *resumeNextMonth)
+		if err != nil {
+			return err
+		}
 		if _, err := loom.ScheduleOptions(ctx, *queue, *scheduleNameFlag, in, spec); err != nil {
 			return err // refused before Temporal is asked
 		}
@@ -313,19 +328,25 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
 		}
 		defer c.Close()
-		if err := loom.CreateSchedule(ctx, c, *queue, *scheduleNameFlag, in, spec); err != nil {
+		if err := loom.CreateScheduleWithBudget(ctx, c, *queue, *scheduleNameFlag, in, spec, b); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "schedule %s: %s\n", *scheduleNameFlag, describeSpec(spec))
+		fmt.Fprintf(out, "schedule %s: %s%s\n", *scheduleNameFlag, describeSpec(spec), describeBudget(&b))
 		return nil
 
 	case "schedules":
 		actions := map[string]string{"pause": *pauseFlag, "resume": *resumeFlag, "delete": *deleteFlag, "run": *runNow}
 		var action, name string
+		if *budget != "" || *resumeNextMonth {
+			action, name = "budget", *scheduleNameFlag
+			if name == "" {
+				return errors.New("schedules -budget needs -name, the schedule's\n" + usage)
+			}
+		}
 		for a, n := range actions {
 			if n != "" {
 				if action != "" {
-					return errors.New("schedules takes at most one of -pause, -resume, -delete or -run\n" + usage)
+					return errors.New("schedules takes at most one of -pause, -resume, -delete, -run or -budget\n" + usage)
 				}
 				action, name = a, n
 			}
@@ -335,7 +356,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("connect to Temporal at %s: %w (is `temporal server start-dev` running?)", *address, err)
 		}
 		defer c.Close()
-		if action != "" {
+		switch action {
+		case "":
+		case "budget":
+			b, err := budgetFlags(*budget, *resumeNextMonth)
+			if err != nil {
+				return err
+			}
+			if err := loom.SetBudget(ctx, c, name, b); err != nil {
+				return err
+			}
+		default:
 			if err := loom.ScheduleAction(ctx, c, name, action); err != nil {
 				return err
 			}
@@ -464,6 +495,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		return writesCommand(ctx, out, c, *workflowID, *approveWrite, *declineWrite)
+
+	case "costs":
+		if *store == "" || fs.NArg() != 0 {
+			return errors.New("costs needs -store DIR\n" + usage)
+		}
+		return costs(ctx, out, *store, *month, *tz, *pricesFile, time.Now())
 
 	case "beliefs":
 		if *store == "" || fs.NArg() != 0 {
@@ -1081,7 +1118,7 @@ func printSchedules(out io.Writer, ss []loom.Schedule) {
 		if len(prog) > 60 {
 			prog = prog[:60] + "…"
 		}
-		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d recent runs  %s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog)
+		fmt.Fprintf(out, "%-20s %-24s %-7s next %-26s %d recent runs  %s%s\n", s.Name, describeSpec(s.Spec), state, next, len(s.Recent), prog, describeBudget(s.Budget))
 	}
 }
 
@@ -1118,6 +1155,7 @@ func printProposal(out io.Writer, p loom.Proposal) {
 	if p.Program == "" && p.Skill == "" {
 		return // only something to remember
 	}
+	defer printProposalUsage(out, p.Usage)
 	if p.Skill != "" {
 		fmt.Fprintf(out, "\nNo command or skill here can do that. A skill that could:\n  %s\nCreate it with: heedle skills -store DIR -create %q -agent-image ID (it waits for your review)\n", p.Skill, p.Skill)
 		return

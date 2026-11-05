@@ -67,6 +67,9 @@ type RunResult struct {
 	Outputs map[string]string // every node's output
 	Leaves  []string          // nodes nothing depends on
 	Writes  []WriteOutcome    `json:",omitempty"` // the run's writes, if any
+	// Skipped is why the run started nothing and recorded nothing: its
+	// schedule's monthly budget (roadmap 10.4), as the pause note says.
+	Skipped string `json:",omitempty"`
 }
 
 // RecordInput is everything Record writes. At is the workflow's clock, so
@@ -82,6 +85,9 @@ type RecordInput struct {
 	// Writes are the run's queued writes and what came of each; none for
 	// most runs.
 	Writes []WriteOutcome `json:",omitempty"`
+	// Schedule is the schedule that started the run, if one did
+	// (TrailerSchedule).
+	Schedule string `json:",omitempty"`
 }
 
 // RunWorkflow runs the plan as shuttle's PlanWorkflow, then records the
@@ -96,6 +102,23 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 	for _, n := range in.Plan.Nodes {
 		if err := warp.ValidName(string(n.ID)); err != nil {
 			return RunResult{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
+		}
+	}
+	// A run a schedule started first checks the schedule's monthly
+	// budget (budget.go): over it, the schedule is paused and the run ends
+	// here, having started no step and recorded nothing.
+	schedule := scheduleOf(func() string { id, _ := workflow.GetTypedSearchAttributes(ctx).GetKeyword(scheduledByID); return id }())
+	if schedule != "" && workflow.GetVersion(ctx, budgetChange, workflow.DefaultVersion, 1) == 1 {
+		budget := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 2 * time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 5}})
+		var note string
+		if err := workflow.ExecuteActivity(budget, BudgetName, BudgetInput{Schedule: schedule, Ref: in.Ref, At: workflow.Now(ctx)}).Get(ctx, &note); err != nil {
+			return RunResult{}, err
+		}
+		if note != "" {
+			if err := workflow.UpsertMemo(ctx, map[string]any{MemoSkipped: note}); err != nil {
+				return RunResult{}, err
+			}
+			return RunResult{Skipped: note}, nil
 		}
 	}
 	// Check the ref (needs git) and that the program really compiles to
@@ -146,6 +169,7 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		RunID:      info.WorkflowExecution.RunID,
 		At:         workflow.Now(ctx),
 		Writes:     writes,
+		Schedule:   schedule,
 	}
 	var commit warp.ID
 	if err := workflow.ExecuteActivity(act, RecordName, rec).Get(ctx, &commit); err != nil {
@@ -212,6 +236,12 @@ type Recorder struct {
 	// record's uses/ directory, so a record holds everything it needs to
 	// be checked again, wherever its history is cloned or pushed.
 	Uses func(context.Context, plan.Plan) ([]warp.Entry, error)
+	// Schedules and PricesFile are for the budget check of a run a
+	// schedule started (Budget): the schedules, and your prices file
+	// (ReadPrices). Without Schedules, every scheduled run fails rather
+	// than run unchecked.
+	Schedules  ScheduleControl
+	PricesFile string
 }
 
 // Record writes one run into warp and advances the ref to it.
@@ -371,11 +401,11 @@ func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) 
 		Tree:    tree,
 		Parents: parents,
 		Message: "run " + in.WorkflowID,
-		Trailers: []warp.Trailer{
+		Trailers: append([]warp.Trailer{
 			{Key: TrailerWorkflow, Value: in.WorkflowID},
 			{Key: TrailerRun, Value: in.RunID},
 			{Key: TrailerProgram, Value: programID},
-		},
+		}, scheduleTrailer(in.Schedule)...),
 		Author: warp.Signature{Name: "loom", Email: "loom@heedle.ai", When: in.At},
 	})
 	if err != nil {
@@ -418,6 +448,7 @@ func RegisterWith(w plan.Registry, check *Checker, rec *Recorder) {
 	w.RegisterWorkflowWithOptions(RunWorkflow, workflow.RegisterOptions{Name: RunWorkflowName})
 	w.RegisterActivityWithOptions(check.Check, activity.RegisterOptions{Name: CheckName})
 	w.RegisterActivityWithOptions(rec.Record, activity.RegisterOptions{Name: RecordName})
+	w.RegisterActivityWithOptions(rec.Budget, activity.RegisterOptions{Name: BudgetName})
 	w.RegisterWorkflowWithOptions(BranchWorkflow, workflow.RegisterOptions{Name: BranchWorkflowName})
 	w.RegisterWorkflowWithOptions(MergeWorkflow, workflow.RegisterOptions{Name: MergeWorkflowName})
 	w.RegisterActivityWithOptions(rec.Branch, activity.RegisterOptions{Name: BranchName})

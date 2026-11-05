@@ -26,6 +26,9 @@ type Notice struct {
 	Body     string `json:"body"`
 	Workflow string `json:"workflowId"`
 	Run      string `json:"runId"`
+	// Schedule is set on a notice about a schedule itself, such as its
+	// budget pausing it: the schedule's name.
+	Schedule string `json:"schedule,omitempty"`
 }
 
 var taskQueueName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
@@ -88,9 +91,17 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 		}
 		w.told[key] = closed
 		n := Notice{Key: key, Workflow: wf, Run: run, Title: "heedle: " + name + " finished", Body: "Its run is recorded."}
-		switch s := e.GetStatus(); s {
-		case enums.WORKFLOW_EXECUTION_STATUS_COMPLETED:
-		case enums.WORKFLOW_EXECUTION_STATUS_FAILED, enums.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
+		var skipped string
+		if p := e.GetMemo().GetFields()[MemoSkipped]; p != nil {
+			dc.FromPayload(p, &skipped)
+		}
+		switch s := e.GetStatus(); {
+		case s == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED && skipped != "":
+			// Its budget paused the schedule before the run did anything
+			// (roadmap 10.4).
+			n.Title, n.Body, n.Schedule = "heedle: "+name+" paused", strings.ToUpper(skipped[:1])+skipped[1:]+". It started nothing.", name
+		case s == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+		case s == enums.WORKFLOW_EXECUTION_STATUS_FAILED, s == enums.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
 			// A schedule pauses when a run fails (PauseOnFailure).
 			n.Title, n.Body = "heedle: "+name+" didn't finish", "Its run "+map[bool]string{true: "failed", false: "timed out"}[s == enums.WORKFLOW_EXECUTION_STATUS_FAILED]+", and its schedule is paused until you look."
 		default:
@@ -107,6 +118,16 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 		if strings.HasPrefix(k, "run:") && at.Before(w.Since.Add(-time.Minute)) {
 			delete(w.told, k)
 		}
+	}
+	// Schedules a budget paused in an earlier month, to resume in a new
+	// one, resume (roadmap 10.4); each is told once, as it then runs.
+	resumed, err := ResumeBudgets(ctx, w.Client, w.Queue, now)
+	for _, name := range resumed {
+		out = append(out, Notice{Key: "resumed:" + name + ":" + now.UTC().Format("2006-01"), Schedule: name,
+			Title: "heedle: " + name + " resumed", Body: "A new month: its monthly budget starts again."})
+	}
+	if err != nil {
+		return out, err
 	}
 	// Writes waiting in runs going now.
 	running, err := w.list(ctx, fmt.Sprintf("WorkflowType = '%s' AND TaskQueue = '%s' AND ExecutionStatus = 'Running'", RunWorkflowName, w.Queue))
