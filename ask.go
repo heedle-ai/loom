@@ -71,6 +71,10 @@ type AskRequest struct {
 	Earlier  []Turn `json:"earlier,omitempty"`
 	Today    string `json:"today,omitempty"`    // YYYY-MM-DD; today in UTC if empty
 	TimeZone string `json:"timeZone,omitempty"` // an IANA name; UTC if empty
+	// NoMemory asks without what heedle remembers: drawdown sets it for a
+	// request from another machine, as memory is shown and changed only
+	// from this one (review 47).
+	NoMemory bool `json:"noMemory,omitempty"`
 }
 
 // Proposal is what heedle would do for a request: a program (compiled,
@@ -256,6 +260,8 @@ func propose(ctx context.Context, reg *registry.Registry, a askAnswer, zone stri
 			return Proposal{}, errors.New("a schedule goes with a program")
 		}
 		return p, nil
+	case p.Program == "" && p.Skill == "" && len(p.Remember) > 0:
+		return Proposal{}, errors.New(`this request asks for something to be done, not only for something to be remembered: give a "program" or a "skill" as well as "remember"`)
 	case (p.Program == "") == (p.Skill == ""):
 		return Proposal{}, errors.New(`give exactly one of "program" and "skill"`)
 	case len(p.Skill) > MaxSkillIdea:
@@ -323,9 +329,12 @@ func suggestions(in []string) ([]string, error) {
 	return out, nil
 }
 
-// rememberOnly is a request only to remember something: "remember that
-// ...", "please note ...".
-var rememberOnly = regexp.MustCompile(`(?i)^\s*(please[,\s]+)?(remember|note|keep in mind|don'?t forget)\b`)
+// rememberOnly is a request that asks heedle to remember something,
+// however it's put ("can you remember that …", "… please remember that",
+// "from now on, remember …", "merk dir …"), and not one to remember to do
+// something ("remember to book the train") or a note ("Note: plan Porto")
+// (review 47).
+var rememberOnly = regexp.MustCompile(`(?i)\b(remember(\s+(that|this|me|my|i|i'm|i am|we|we're|for next time)\b|\s*[:,.!?]|$)|keep (it )?in mind|don'?t forget (that|i|my)\b|note that\b|make a note\b|from now on\b|merke? (dir|sie)\b|recuerda que\b|souviens-toi\b|retiens que\b|lembre-se\b|ricorda che\b|onthoud\b)`)
 
 var isoDay = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
@@ -383,7 +392,7 @@ func (w Writer) Ask(ctx context.Context, in AskRequest) (Proposal, error) {
 	// (roadmap 10.1). It's read here, on the worker; the proposal names the
 	// memories sent by ID.
 	var memory Memories
-	if w.MemoryFile != "" {
+	if w.MemoryFile != "" && !in.NoMemory {
 		if memory, err = ReadMemory(w.MemoryFile); err != nil {
 			return Proposal{}, fmt.Errorf("%w: heedle's memory has a problem to fix first (heedle memory, or the Memory page, lists it and can forget it): %v", pirn.ErrInvalid, err)
 		}
