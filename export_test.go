@@ -2,6 +2,9 @@ package loom
 
 import (
 	"context"
+	"time"
+
+	"github.com/heedle-ai/shuttle/plan"
 
 	"github.com/heedle-ai/warp"
 )
@@ -23,4 +26,11 @@ func SetHashBlob(f func(context.Context, []byte) (warp.ID, error)) func() {
 	old := hashBlob
 	hashBlob = f
 	return func() { hashBlob = old }
+}
+
+// SetNoteRecorded replaces how Record notes a record, until the test ends.
+func SetNoteRecorded(f func(context.Context, *warp.Store, string, string, string, time.Time, plan.Plan, map[string]string) error) func() {
+	old := noteRecorded
+	noteRecorded = f
+	return func() { noteRecorded = old }
 }
