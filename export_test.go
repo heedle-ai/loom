@@ -17,3 +17,10 @@ func ReadIndex(ctx context.Context, s History, commit warp.ID) (map[string]strin
 	idx, err := readIndex(ctx, s, commit)
 	return idx.runs, err
 }
+
+// SetHashBlob replaces how Counted hashes an output, until the test ends.
+func SetHashBlob(f func(context.Context, []byte) (warp.ID, error)) func() {
+	old := hashBlob
+	hashBlob = f
+	return func() { hashBlob = old }
+}

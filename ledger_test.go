@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -252,6 +253,21 @@ func TestInv_TheLedgerIsItsOwn(t *testing.T) {
 	if runs := must(loom.AllRunsBetween(ctx, s, at.Add(-time.Hour), at.Add(time.Hour))); len(runs) != 0 {
 		t.Errorf("the ledger was read as runs: %+v", runs)
 	}
+	// Two entries under one ID (writers racing): the first is read.
+	dir := refs[0].Name[:strings.LastIndex(refs[0].Name, "/")+1]
+	other := e
+	other.Ledger, other.Calls = 1, []pirn.Call{hundred, hundred}
+	blob := must(s.PutBlob(ctx, []byte(jsonOf(other))))
+	tree := must(s.PutTree(ctx, []warp.Entry{{Name: "entry.json", Kind: warp.KindBlob, ID: blob}}))
+	commit := must(s.Commit(ctx, warp.CommitSpec{Tree: tree, Message: "usage", Author: warp.Signature{Name: "x", Email: "x@y", When: at}}))
+	if err := s.Advance(ctx, dir+string(blob), "", commit); err != nil {
+		t.Fatal(err)
+	}
+	refs = must(s.Refs(ctx, dir))
+	es := must(loom.ReadLedger(ctx, s, at.Add(-time.Hour), at.Add(time.Hour)))
+	if len(refs) != 2 || len(es) != 1 || len(es[0].Calls) != map[bool]int{true: 2, false: 1}[refs[0].Name == dir+string(blob)] {
+		t.Errorf("two under one ID: %+v read as %+v", refs, es)
+	}
 }
 
 // TestLaw_EveryCallIsCountedOnce: with random failures and retries, what
@@ -305,12 +321,14 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 			},
 		}
 		src := leaf(3)
-		// Every fifth run starts in the month before (its record is
-		// then that month's, its attempts this one's: review 56).
+		// Every fifth run starts in the month before, three days before
+		// its end: its record is then that month's, and its attempts,
+		// on the real clock, this one's and more than a day later, as an
+		// act step waiting for a person may be (review 56 rounds 1, 2).
 		start := at
 		if i%5 == 0 {
 			start, _ = loom.MonthOf(at, time.UTC)
-			start = start.Add(-time.Minute)
+			start = start.AddDate(0, 0, -3)
 		}
 		succeeded = 0
 		if _, err := ledgerRun(t, s, nil, src, "", start, step); err != nil && succeeded > 0 {
@@ -387,8 +405,26 @@ func TestInv_SuccessNeverWaitsOnTheLedger(t *testing.T) {
 	if _, err := agent(short, plan.Input{NodeID: "n1"}); err == nil {
 		t.Fatal("the failing step succeeded")
 	}
+	// Nor a failed one's: its error mustn't become a timeout Temporal
+	// tries again (review 56 round 2). With time left, it is noted.
+	if es := must(loom.ReadLedger(ctx, s, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))); len(es) != 0 {
+		t.Errorf("a failed attempt noted with no time left: %+v", es)
+	}
+	if _, err := agent(ctx, plan.Input{NodeID: "n1"}); err == nil {
+		t.Fatal("the failing step succeeded")
+	}
 	if es := must(loom.ReadLedger(ctx, s, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))); len(es) != 1 || !es[0].Failed {
-		t.Errorf("a failed attempt near its deadline wasn't noted: %+v", es)
+		t.Errorf("a failed attempt wasn't noted: %+v", es)
+	}
+	// A success whose output can't be hashed couldn't be set aside: it
+	// isn't noted, so its record alone counts it.
+	restore := loom.SetHashBlob(func(context.Context, []byte) (warp.ID, error) { return "", errors.New("no git") })
+	if out, err := ask(ctx, plan.Input{NodeID: "n2"}); err != nil || out == "" {
+		t.Errorf("a success that can't be hashed: %q %v", out, err)
+	}
+	restore()
+	if es := must(loom.ReadLedger(ctx, s, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))); len(es) != 1 {
+		t.Errorf("a success that couldn't be hashed was noted: %+v", es)
 	}
 	if !loom.IsCounted(reg[pirn.ActivityName]) || loom.IsCounted(step(false)) {
 		t.Error("IsCounted doesn't tell a counted step")
@@ -436,24 +472,29 @@ func TestInv_LongRunsKeepTheirSchedule(t *testing.T) {
 // meets one pauses its schedule saying so, rather than leave its calls
 // out (LOOM-329, review 56).
 func TestInv_UnreadableEntriesFailClosed(t *testing.T) {
-	s := newStore(t)
-	at := now()
-	blob := must(s.PutBlob(ctx, []byte("not an entry")))
-	tree := must(s.PutTree(ctx, []warp.Entry{{Name: "entry.json", Kind: warp.KindBlob, ID: blob}}))
-	commit := must(s.Commit(ctx, warp.CommitSpec{Tree: tree, Message: "usage: ?", Author: warp.Signature{Name: "x", Email: "x@y", When: at}}))
-	if err := s.Advance(ctx, loom.LedgerPrefix+at.Format("2006-01")+"/"+strings.Repeat("a", 40)+"/"+string(blob), "", commit); err != nil {
-		t.Fatal(err)
-	}
-	this, next := loom.MonthOf(at, time.UTC)
-	xs := must(loom.ExtrasBetween(ctx, s, this, next, "news"))
-	if len(xs) != 1 || !xs[0].Unreadable || len(xs[0].Usage.Missing()) != 1 {
-		t.Fatalf("an unreadable entry: %+v", xs)
-	}
-	sc := &schedules{budget: map[string]loom.ScheduleBudget{"news": {Budget: loom.Budget{USD: 100}}}}
-	cheap := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return false }}
-	res, err := ledgerRun(t, s, sc, `(ask "the news")`, "news", at, cheap)
-	if err != nil || !strings.Contains(res.Skipped, "no estimate") || !sc.budget["news"].Paused {
-		t.Errorf("a budget meeting an unreadable entry: %+v %v", res, err)
+	// In UTC, and west of it, where a month starts hours after UTC's
+	// (review 56 round 2: there it was dropped).
+	for _, zone := range []string{"UTC", "America/Los_Angeles"} {
+		loc := must(time.LoadLocation(zone))
+		s := newStore(t)
+		at := now()
+		blob := must(s.PutBlob(ctx, []byte("not an entry")))
+		tree := must(s.PutTree(ctx, []warp.Entry{{Name: "entry.json", Kind: warp.KindBlob, ID: blob}}))
+		commit := must(s.Commit(ctx, warp.CommitSpec{Tree: tree, Message: "usage: ?", Author: warp.Signature{Name: "x", Email: "x@y", When: at}}))
+		if err := s.Advance(ctx, loom.LedgerPrefix+at.Format("2006-01")+"/"+strings.Repeat("a", 40)+"/"+string(blob), "", commit); err != nil {
+			t.Fatal(err)
+		}
+		this, next := loom.MonthOf(at, loc)
+		xs := must(loom.ExtrasBetween(ctx, s, this, next, "news"))
+		if len(xs) != 1 || !xs[0].Unreadable || len(xs[0].Usage.Missing()) != 1 {
+			t.Fatalf("%s: an unreadable entry: %+v", zone, xs)
+		}
+		sc := &schedules{budget: map[string]loom.ScheduleBudget{"news": {Budget: loom.Budget{USD: 100}, TimeZone: zone}}}
+		cheap := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return false }}
+		res, err := ledgerRun(t, s, sc, `(ask "the news")`, "news", at, cheap)
+		if err != nil || !strings.Contains(res.Skipped, "no estimate") || !strings.Contains(res.Skipped, loom.LedgerPrefix) || !sc.budget["news"].Paused {
+			t.Errorf("%s: a budget meeting an unreadable entry: %+v %v", zone, res, err)
+		}
 	}
 }
 
@@ -481,5 +522,58 @@ func TestInv_AProposalRunIsCountedOnce(t *testing.T) {
 	}
 	if got, by := counted(t, s, from, time.Now().Add(time.Hour)); got != (loom.Tokens{Input: 1100, Output: 110}) {
 		t.Errorf("counted %+v: %+v", got, by)
+	}
+}
+
+// TestInv_RetriesAcrossAMonthEnd: a failed attempt whose step was tried
+// again in the next month is a retry in its own month, not a failed
+// run's (LOOM-335, review 56 round 2).
+func TestInv_RetriesAcrossAMonthEnd(t *testing.T) {
+	s := newStore(t)
+	end := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	for i, at := range []time.Time{end.Add(-time.Minute), end.Add(time.Minute)} {
+		e := loom.LedgerEntry{Kind: loom.LedgerAttempt, At: at, Workflow: "loom-x/plan", Run: "p", Activity: "1", Node: "n0", Step: "ask", Attempt: int32(i + 1), Failed: true, Calls: []pirn.Call{hundred}}
+		if err := loom.WriteLedger(ctx, s, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nov := must(loom.ExtrasBetween(ctx, s, end.AddDate(0, -1, 0), end, ""))
+	dec := must(loom.ExtrasBetween(ctx, s, end, end.AddDate(0, 1, 0), ""))
+	if len(nov) != 1 || nov[0].Kind != loom.ExtraRetry || len(dec) != 1 || dec[0].Kind != loom.ExtraFailedRun {
+		t.Errorf("November %+v, December %+v", nov, dec)
+	}
+}
+
+// noRecords is a store whose records can't be read: every Log fails.
+type noRecords struct{ *warp.Store }
+
+func (noRecords) Log(context.Context, warp.ID, int) ([]warp.CommitInfo, error) {
+	return nil, errors.New("no record may be read")
+}
+
+// TestInv_TheLedgerReadsNoRecord: the ledger's extras are found from the
+// ledger alone: a successful attempt is set aside by its run's
+// LedgerRecorded entry, never by reading records, so a record that can't
+// be read (on any ref) never stops a budget check, and the pages read
+// each record once (LOOM-333, review 56 round 2).
+func TestInv_TheLedgerReadsNoRecord(t *testing.T) {
+	s := newStore(t)
+	at := now()
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(_ string, a int32) bool { return a < 2 }}
+	if res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", at, step); err != nil || res.Commit == "" {
+		t.Fatalf("the run: %+v %v", res, err)
+	}
+	xs, err := loom.ExtrasBetween(ctx, noRecords{s}, at.Add(-time.Hour), at.Add(time.Hour), "")
+	if err != nil || len(xs) != 1 || xs[0].Kind != loom.ExtraRetry {
+		t.Errorf("extras %+v %v", xs, err)
+	}
+}
+
+// TestInv_ScheduleLookupsAreLogged: Counted never drops an error finding
+// an attempt's schedule unsaid (LOOM-334, review 56 round 2).
+func TestInv_ScheduleLookupsAreLogged(t *testing.T) {
+	b := must(os.ReadFile("ledger.go"))
+	if regexp.MustCompile(`, _ = scheduleOfRun\(`).Match(b) || !strings.Contains(string(b), `logLedger(ctx, fmt.Errorf("finding the schedule of %s: %w", e.Workflow, serr))`) {
+		t.Error("Counted drops scheduleOfRun's error")
 	}
 }

@@ -269,12 +269,23 @@ type Recorder struct {
 // never be recorded (an invalid ref or node name) fails with the
 // non-retryable error type "InvalidInput". If another run advanced the ref first, it
 // returns warp.ErrConflict and Temporal retries it on the new head.
+//
+// Once recorded, it notes in the usage ledger which outputs of the run's
+// Claude steps the record holds (NoteRecorded), so their attempts there
+// count once, here; if that fails, Temporal tries Record again, which
+// finds the run recorded and notes it.
 func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) {
 	c, err := r.record(ctx, in)
 	if errors.Is(err, warp.ErrInvalid) {
 		return "", temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", err)
 	}
-	return c, err
+	if err != nil {
+		return c, err
+	}
+	if err := NoteRecorded(ctx, r.Store, in.WorkflowID, in.RunID, in.Schedule, in.At, in.Plan, in.Result.Outputs); err != nil {
+		return "", err
+	}
+	return c, nil
 }
 
 func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) {

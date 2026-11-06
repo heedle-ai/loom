@@ -363,7 +363,7 @@ func TestInv_CostsSayWhatTheyMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"**What still isn't counted:** a skill Claude writes", "a program `loom write` writes", "an attempt whose worker is killed", "A budget can't stop a run already going"} {
+	for _, want := range []string{"**What still isn't counted:** a skill Claude writes", "a program `loom write` writes", "an attempt that ends within `LedgerMargin` (5 seconds) of its deadline", "an attempt whose worker is killed", "update-ref -d refs/usage/", "A budget can't stop a run already going"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("How-It-Works doesn't say %q", want)
 		}
