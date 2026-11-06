@@ -172,9 +172,13 @@ func RunWorkflow(ctx workflow.Context, in RunInput) (RunResult, error) {
 		Ref:        in.Ref,
 		WorkflowID: info.WorkflowExecution.ID,
 		RunID:      info.WorkflowExecution.RunID,
-		At:         workflow.Now(ctx),
-		Writes:     writes,
-		Schedule:   schedule,
+		// Taken here, after every step: the record's time is later than
+		// all its steps' attempts, which is what lets the usage ledger
+		// find its note by month (readRecorded). Never the run's start
+		// (LOOM-338).
+		At:       workflow.Now(ctx),
+		Writes:   writes,
+		Schedule: schedule,
 	}
 	var commit warp.ID
 	if err := workflow.ExecuteActivity(act, RecordName, rec).Get(ctx, &commit); err != nil {
@@ -272,11 +276,12 @@ type Recorder struct {
 //
 // Once recorded, it notes in the usage ledger which outputs of the run's
 // Claude steps the record holds (NoteRecorded), so their attempts there
-// count once, here. If that fails, Temporal tries Record again (which
-// finds the run recorded and notes it), up to NoteAttempts attempts; on
-// the last, a note that still fails is logged and the run is recorded
-// all the same: its successful attempts then count twice, more, never
-// less, and a ledger problem never fails a run (review 56 round 4).
+// count once, here. The note runs under the ledger's deadline
+// (ledgerContext). If it fails, Temporal tries Record again (which finds
+// the run recorded and notes it) until its last try (lastTry): then a
+// note that still fails is logged and the run is recorded all the same,
+// its successful attempts counting twice, more, never less, so a ledger
+// problem never fails a run (review 56 rounds 4, 5).
 func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) {
 	c, err := r.record(ctx, in)
 	if errors.Is(err, warp.ErrInvalid) {
@@ -285,8 +290,14 @@ func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	if err != nil {
 		return c, err
 	}
-	if err := noteRecorded(ctx, r.Store, in.WorkflowID, in.RunID, in.Schedule, in.At, in.Plan, in.Result.Outputs); err != nil {
-		if !activity.IsActivity(ctx) || activity.GetInfo(ctx).Attempt < NoteAttempts {
+	wctx, cancel, ok := ledgerContext(ctx)
+	defer cancel()
+	err = fmt.Errorf("too little time left")
+	if ok {
+		err = noteRecorded(wctx, r.Store, in.WorkflowID, in.RunID, in.Schedule, in.At, in.Plan, in.Result.Outputs)
+	}
+	if err != nil {
+		if activity.IsActivity(ctx) && !lastTry(activity.GetInfo(ctx)) {
 			return "", err
 		}
 		logLedger(ctx, fmt.Errorf("run %s is recorded, but noting it failed, so its steps' successful attempts count twice: %w", in.RunID, err))
@@ -294,9 +305,17 @@ func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	return c, nil
 }
 
-// NoteAttempts is how many of Record's attempts try to note what the
-// record holds before it records the run without the note.
+// NoteAttempts is how many of Record's attempts may fail to note what
+// the record holds before it records the run without the note.
 const NoteAttempts = 5
+
+// lastTry reports whether Record gives up noting on this attempt: its
+// NoteAttempts-th, or one Temporal won't try again, since what's left of
+// its schedule-to-close limit is less than its start-to-close period (a
+// note that hangs can't eat the rest: review 56 round 5).
+func lastTry(info activity.Info) bool {
+	return info.Attempt >= NoteAttempts || info.StartToCloseTimeout > 0 && info.Deadline.Sub(info.StartedTime) < info.StartToCloseTimeout
+}
 
 // noteRecorded is NoteRecorded; a test makes it fail.
 var noteRecorded = NoteRecorded

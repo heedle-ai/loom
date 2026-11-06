@@ -622,16 +622,16 @@ func TestInv_RecordsAreFoundByTheirRun(t *testing.T) {
 	ls := &listingStore{Store: s}
 	this, _ := loom.MonthOf(at, time.UTC)
 	xs := must(loom.ExtrasBetween(ctx, ls, this, at.Add(time.Hour), ""))
-	if len(xs) != 8 || xs[0].Kind != loom.ExtraRetry || ls.calls > 2 {
+	if len(xs) != 8 || xs[0].Kind != loom.ExtraRetry || ls.calls > 3 {
 		t.Errorf("%d extras %+v; %d listings of records", len(xs), xs, ls.calls)
 	}
 }
 
 // TestInv_ALedgerProblemNeverFailsARun: when noting what a record holds
-// keeps failing, Record tries again a few times, then records the run
-// all the same (logged; its successful attempts count twice, never
-// less), so the run ends recorded, never failed (LOOM-337, review 56
-// round 4).
+// keeps failing, Record tries again until its last try, then records
+// the run all the same (logged; its successful attempts count twice,
+// never less), so the run ends recorded, never failed (LOOM-337, review
+// 56 rounds 4, 5).
 func TestInv_ALedgerProblemNeverFailsARun(t *testing.T) {
 	s := newStore(t)
 	tries := 0
@@ -643,5 +643,41 @@ func TestInv_ALedgerProblemNeverFailsARun(t *testing.T) {
 	res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", now(), step)
 	if err != nil || res.Commit == "" || tries != loom.NoteAttempts {
 		t.Errorf("a run whose note fails: %+v %v after %d tries", res, err, tries)
+	}
+	// Nor on an earlier attempt that Temporal won't follow with another:
+	// the schedule-to-close limit leaves it less than its start-to-close
+	// period (a note that hung ate the rest).
+	start := time.Now()
+	for _, c := range []struct {
+		info activity.Info
+		last bool
+	}{
+		{activity.Info{Attempt: 1, StartedTime: start, Deadline: start.Add(time.Minute), StartToCloseTimeout: time.Minute}, false},
+		{activity.Info{Attempt: 2, StartedTime: start, Deadline: start.Add(20 * time.Second), StartToCloseTimeout: time.Minute}, true},
+		{activity.Info{Attempt: loom.NoteAttempts, StartedTime: start, Deadline: start.Add(time.Minute), StartToCloseTimeout: time.Minute}, true},
+	} {
+		if loom.LastTry(c.info) != c.last {
+			t.Errorf("%+v: last try %v", c.info, !c.last)
+		}
+	}
+}
+
+// TestInv_ARecordIsAfterItsSteps: a run's record (and so its note in the
+// usage ledger) is timed after its steps, never at the run's start: a run
+// that starts just before a month ends, and whose step is tried again
+// into the next month, has its note in the next month (LOOM-338, review
+// 56 round 5). readRecorded relies on it.
+func TestInv_ARecordIsAfterItsSteps(t *testing.T) {
+	s := newStore(t)
+	_, next := loom.MonthOf(now(), time.UTC)
+	start := next.Add(-500 * time.Millisecond)
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(_ string, a int32) bool { return a < 2 }}
+	if res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", start, step); err != nil || res.Commit == "" {
+		t.Fatalf("the run: %+v %v", res, err)
+	}
+	before := must(s.Refs(ctx, loom.LedgerPrefix+"recorded/"+start.Format("2006-01")+"/"))
+	after := must(s.Refs(ctx, loom.LedgerPrefix+"recorded/"+next.Format("2006-01")+"/"))
+	if len(before) != 0 || len(after) != 1 {
+		t.Errorf("the note is in the run's start month (%v), not its record's (%v)", before, after)
 	}
 }
