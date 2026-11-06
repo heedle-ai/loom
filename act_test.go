@@ -73,7 +73,7 @@ func TestInv_WritersKnowAct(t *testing.T) {
 	}
 	// Roadmap 9.7, review 41: they're told it stops before sending, and
 	// never to opt out unless the request says so.
-	for _, want := range []string{"fills in a form", "stops before each send to ask", "may reach only", "can't sign in", "asks the person to take the wheel", "say so in the summary", "Never add :send-without-asking", ":uses", "never write the details themselves", "replayed next time without Claude", ":replay \"off\""} {
+	for _, want := range []string{"fills in a form", "stops before each send to ask", "may reach only", "can't sign in", "asks the person to take the wheel", "say so in the summary", "Never add :send-without-asking", ":uses", "never write the details themselves", "replayed next time without Claude", ":replay \"off\"", ":signed-in", "never with :send-without-asking"} {
 		if !strings.Contains(c.About, want) {
 			t.Errorf("act's description lacks %q: %s", want, c.About)
 		}
