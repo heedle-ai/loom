@@ -34,3 +34,6 @@ func SetNoteRecorded(f func(context.Context, *warp.Store, string, string, string
 	noteRecorded = f
 	return func() { noteRecorded = old }
 }
+
+// LastTry exposes when Record gives up noting a record.
+var LastTry = lastTry

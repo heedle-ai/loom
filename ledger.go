@@ -479,10 +479,13 @@ func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, schedule 
 	if len(entries) == 0 {
 		return nil, nil
 	}
+	// A month past now: the reader's clock may be behind the one runs
+	// are recorded on (review 56 round 5).
 	until := time.Now()
 	if to.After(until) {
 		until = to
 	}
+	until = until.AddDate(0, 1, 0)
 	recorded, err := readRecorded(ctx, s, runs, from, until)
 	if err != nil {
 		return nil, err
