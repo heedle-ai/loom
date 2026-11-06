@@ -92,7 +92,7 @@ go run ./cmd/loom secret set ANTHROPIC_API_KEY
 go run ./cmd/loom worker -store ~/heedle-store.git
 ```
 
-Connectors' keys work the same way: a connector that names `MAPS_KEY` finds it in the environment or the keychain from its next step. `loom secret delete NAME` removes one, and `loom secret delete --all` every key heedle keeps (asking first at a terminal).
+Connectors' keys work the same way: a connector that names `MAPS_KEY` finds it in the environment or the keychain from its next step. `loom secret delete NAME` removes one, and `loom secret delete --all` every key heedle keeps (asking first at a terminal), and with them your saved sign-ins: the folder `~/.heedle/sessions` (or `$HEEDLE_SESSIONS`) is removed too (roadmap 9.11). The keys of your details and of saved sign-ins aren't set or deleted one by one here: change or forget them under **You** on drawdown's Connectors page.
 
 Then in terminal 3:
 

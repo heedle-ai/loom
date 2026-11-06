@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -472,6 +473,7 @@ func (f fakeKeychain) DeleteAll(context.Context) (int, error) {
 // script, as an uninstaller runs it. (Roadmap 7.1.)
 func TestInv_DeleteAllAsksAtATerminal(t *testing.T) {
 	ctx := context.Background()
+	t.Setenv("HEEDLE_SESSIONS", filepath.Join(t.TempDir(), "sessions")) // never the real ones
 	kc := fakeKeychain{"A": "1", "B": "2"}
 	oldVault, oldTerm := vault, isTerminal
 	t.Cleanup(func() { vault, isTerminal, stdin = oldVault, oldTerm, os.Stdin })
@@ -863,8 +865,39 @@ func TestInv_AskSaysWhatMemoryDid(t *testing.T) {
 // refuse the names the person's details are kept under, which the
 // Connectors page's You section keeps (review 42); delete --all forgets
 // them with every other heedle secret.
+// TestInv_DeleteAllForgetsSignIns: `loom secret delete --all` forgets the
+// saved sign-ins too: their keys with every heedle key, and their files;
+// and the secret commands leave a sign-in's key be, by name (roadmap 9.11).
+func TestInv_DeleteAllForgetsSignIns(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv("HEEDLE_SESSIONS", dir)
+	kc := fakeKeychain{}
+	oldVault, oldTerm := vault, isTerminal
+	t.Cleanup(func() { vault, isTerminal, stdin = oldVault, oldTerm, os.Stdin })
+	vault, isTerminal = kc, func() bool { return false }
+	s := pirn.Sessions{Dir: dir, Vault: kc}
+	if err := s.Save(ctx, "forms.example.org", []byte(`{"cookies":[],"origins":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	key := pirn.SessionKey("forms.example.org")
+	for _, op := range []string{"set", "delete"} {
+		stdin = strings.NewReader("x\n")
+		if err := Run(ctx, []string{"secret", op, key}, io.Discard); err == nil || !strings.Contains(err.Error(), "saved sign-in") || kc[key] == "" {
+			t.Errorf("secret %s: %v", op, err)
+		}
+	}
+	var out bytes.Buffer
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, &out); err != nil || len(kc) != 0 || !strings.Contains(out.String(), "saved sign-ins") {
+		t.Fatalf("%v %v %q", err, kc, out.String())
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the sign-ins' files are still there")
+	}
+}
+
 func TestInv_SecretCommandsLeaveDetailsBe(t *testing.T) {
-	kc := fakeKeychain{"HEEDLE_PROFILE_EMAIL": "YWRhQGV4YW1wbGUub3Jn"}
+	kc := fakeKeychain{"HEEDLE_PROFILE_EMAIL": "YWRhQGV4YW1wbGUub3Jn", "HEEDLE_SESSION_0123456789ABCDEF01234567": "k"}
 	oldVault := vault
 	t.Cleanup(func() { vault, stdin = oldVault, os.Stdin })
 	vault = kc
@@ -872,6 +905,11 @@ func TestInv_SecretCommandsLeaveDetailsBe(t *testing.T) {
 		stdin = strings.NewReader("x\n")
 		if err := Run(context.Background(), []string{"secret", op, "HEEDLE_PROFILE_EMAIL"}, io.Discard); err == nil || !strings.Contains(err.Error(), "one of your details") || kc["HEEDLE_PROFILE_EMAIL"] == "" {
 			t.Errorf("secret %s: %v %v", op, err, kc)
+		}
+		// Roadmap 9.11: nor a saved sign-in's key.
+		stdin = strings.NewReader("x\n")
+		if err := Run(context.Background(), []string{"secret", op, "HEEDLE_SESSION_0123456789ABCDEF01234567"}, io.Discard); err == nil || !strings.Contains(err.Error(), "saved sign-in") || kc["HEEDLE_SESSION_0123456789ABCDEF01234567"] != "k" {
+			t.Errorf("secret %s, a sign-in's key: %v %v", op, err, kc)
 		}
 	}
 }
