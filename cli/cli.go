@@ -1039,12 +1039,30 @@ func deleteAllSecrets(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Saved sign-ins go too (roadmap 9.11): their keys were heedle's, and
+	// their files are removed.
+	if err := os.RemoveAll(sessionsDir()); err != nil {
+		return fmt.Errorf("forgetting your saved sign-ins: %w", err)
+	}
 	if n < 0 {
-		fmt.Fprintln(out, "Deleted every heedle key from your keychain.")
+		fmt.Fprintln(out, "Deleted every heedle key from your keychain, and your saved sign-ins.")
 	} else {
-		fmt.Fprintf(out, "Deleted %d heedle key%s from your keychain.\n", n, map[bool]string{true: "", false: "s"}[n == 1])
+		fmt.Fprintf(out, "Deleted %d heedle key%s from your keychain, and your saved sign-ins.\n", n, map[bool]string{true: "", false: "s"}[n == 1])
 	}
 	return nil
+}
+
+// sessionsDir is where heedle up keeps saved sign-ins: ~/.heedle/sessions,
+// or HEEDLE_SESSIONS. A variable for tests.
+var sessionsDir = func() string {
+	if d := os.Getenv("HEEDLE_SESSIONS"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".heedle", "sessions")
 }
 
 // isTerminal reports whether standard input is a terminal; a variable for
@@ -1061,6 +1079,9 @@ var isTerminal = func() bool {
 func secretCommand(ctx context.Context, out io.Writer, op, name string) error {
 	if pirn.IsProfileName(name) {
 		return fmt.Errorf("%s is one of your details: change it under You on the Connectors page (heedle up), or forget every secret with delete --all", name)
+	}
+	if pirn.IsSessionName(name) {
+		return fmt.Errorf("%s is the key of a saved sign-in: forget it under You on the Connectors page (heedle up), or forget every secret with delete --all", name)
 	}
 	if op == "delete" {
 		if err := vault.Delete(ctx, name); err != nil {
