@@ -272,8 +272,11 @@ type Recorder struct {
 //
 // Once recorded, it notes in the usage ledger which outputs of the run's
 // Claude steps the record holds (NoteRecorded), so their attempts there
-// count once, here; if that fails, Temporal tries Record again, which
-// finds the run recorded and notes it.
+// count once, here. If that fails, Temporal tries Record again (which
+// finds the run recorded and notes it), up to NoteAttempts attempts; on
+// the last, a note that still fails is logged and the run is recorded
+// all the same: its successful attempts then count twice, more, never
+// less, and a ledger problem never fails a run (review 56 round 4).
 func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) {
 	c, err := r.record(ctx, in)
 	if errors.Is(err, warp.ErrInvalid) {
@@ -282,11 +285,21 @@ func (r *Recorder) Record(ctx context.Context, in RecordInput) (warp.ID, error) 
 	if err != nil {
 		return c, err
 	}
-	if err := NoteRecorded(ctx, r.Store, in.WorkflowID, in.RunID, in.Schedule, in.At, in.Plan, in.Result.Outputs); err != nil {
-		return "", err
+	if err := noteRecorded(ctx, r.Store, in.WorkflowID, in.RunID, in.Schedule, in.At, in.Plan, in.Result.Outputs); err != nil {
+		if !activity.IsActivity(ctx) || activity.GetInfo(ctx).Attempt < NoteAttempts {
+			return "", err
+		}
+		logLedger(ctx, fmt.Errorf("run %s is recorded, but noting it failed, so its steps' successful attempts count twice: %w", in.RunID, err))
 	}
 	return c, nil
 }
+
+// NoteAttempts is how many of Record's attempts try to note what the
+// record holds before it records the run without the note.
+const NoteAttempts = 5
+
+// noteRecorded is NoteRecorded; a test makes it fail.
+var noteRecorded = NoteRecorded
 
 func (r *Recorder) record(ctx context.Context, in RecordInput) (warp.ID, error) {
 	s := r.Store

@@ -106,7 +106,7 @@ func (e LedgerEntry) ledgerDir() string {
 	case LedgerRun:
 		return LedgerPrefix + "runs/" + e.id() + "/"
 	case LedgerRecorded:
-		return recordedDir(e.Workflow) + e.id() + "/"
+		return recordedDir(e.At, e.Workflow) + e.id() + "/"
 	}
 	return LedgerPrefix + e.At.UTC().Format("2006-01") + "/" + e.id() + "/"
 }
@@ -171,11 +171,18 @@ func scheduleOfRun(ctx context.Context, s Records, workflow string) (string, err
 	return e.Schedule, nil
 }
 
-// recordedDir is where the LedgerRecorded entries of workflow's runs are
-// (a workflow ID is reused by every run of the same input).
-func recordedDir(workflow string) string {
+// recordedMonth is where the LedgerRecorded entries of the runs recorded
+// in at's month (UTC) are.
+func recordedMonth(at time.Time) string {
+	return LedgerPrefix + "recorded/" + at.UTC().Format("2006-01") + "/"
+}
+
+// recordedDir is where the LedgerRecorded entries of workflow's runs
+// recorded in at's month are (a workflow ID is reused by every run of the
+// same input).
+func recordedDir(at time.Time, workflow string) string {
 	sum := sha256.Sum256([]byte(workflow))
-	return LedgerPrefix + "recorded/" + hex.EncodeToString(sum[:20]) + "/"
+	return recordedMonth(at) + hex.EncodeToString(sum[:20]) + "/"
 }
 
 // NoteRecorded writes which outputs of the Claude steps of p a record of
@@ -201,32 +208,39 @@ func NoteRecorded(ctx context.Context, s *warp.Store, workflow, run, schedule st
 	return WriteLedger(ctx, s, e)
 }
 
-// readRecorded is the LedgerRecorded entries of the runs of workflows:
-// one listing of each workflow's own folder (never of every record's,
-// which grows with every run ever recorded: review 56 round 3), then one
-// read of their blobs. One that can't be read is left out, so its run's
-// attempts aren't set aside and count (more, never less).
-func readRecorded(ctx context.Context, s Records, workflows map[string]bool) ([]LedgerEntry, error) {
-	names := make([]string, 0, len(workflows))
-	for w := range workflows {
-		names = append(names, w)
+// readRecorded is the LedgerRecorded entries of the runs of workflows
+// recorded in a month from from's to until's: one listing a month (never
+// one a run, nor every month's: review 56 rounds 3, 4), then one read of
+// the blobs of those wanted. A run is recorded after its steps' attempts,
+// and no later than now, so the record of an attempt made from from is in
+// one of those months when until is now (or later). One that can't be
+// read is left out, so its run's attempts aren't set aside and count
+// (more, never less).
+func readRecorded(ctx context.Context, s Records, workflows map[string]bool, from, until time.Time) ([]LedgerEntry, error) {
+	if len(workflows) == 0 {
+		return nil, nil
 	}
-	sort.Strings(names)
+	want := map[string]bool{}
+	for w := range workflows {
+		sum := sha256.Sum256([]byte(w))
+		want[hex.EncodeToString(sum[:20])] = true
+	}
 	var ids []warp.ID
-	for _, w := range names {
-		refs, err := s.Refs(ctx, recordedDir(w))
+	seen := map[string]bool{}
+	for m := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC); !m.After(until); m = m.AddDate(0, 1, 0) {
+		prefix := recordedMonth(m)
+		refs, err := s.Refs(ctx, prefix)
 		if err != nil {
 			return nil, err
 		}
-		seen := map[string]bool{}
 		for _, r := range refs {
-			i := strings.LastIndex(r.Name, "/")
-			dir, b := r.Name[:i], r.Name[i+1:]
-			if seen[dir] || !ledgerBlob.MatchString(b) {
+			// <prefix><hash(workflow)>/<id>/<blob>
+			parts := strings.Split(strings.TrimPrefix(r.Name, prefix), "/")
+			if len(parts) != 3 || !want[parts[0]] || seen[parts[0]+"/"+parts[1]] || !ledgerBlob.MatchString(parts[2]) {
 				continue
 			}
-			seen[dir] = true
-			ids = append(ids, warp.ID(b))
+			seen[parts[0]+"/"+parts[1]] = true
+			ids = append(ids, warp.ID(parts[2]))
 		}
 	}
 	if len(ids) == 0 {
@@ -455,8 +469,9 @@ func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, schedule 
 			continue
 		}
 		entries = append(entries, e)
-		// Only a success can be set aside (a failure carries its
-		// schedule): its run's record is looked up, one git command each.
+		// Only a success can be set aside, so only its run's record is
+		// looked up. A failure carries its schedule, unless finding it
+		// failed (logged, LOOM-334): then it is charged to none.
 		if e.Kind == LedgerAttempt && !e.Failed && e.Output != "" {
 			runs[runOf(e.Workflow)] = true
 		}
@@ -464,7 +479,11 @@ func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, schedule 
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	recorded, err := readRecorded(ctx, s, runs)
+	until := time.Now()
+	if to.After(until) {
+		until = to
+	}
+	recorded, err := readRecorded(ctx, s, runs, from, until)
 	if err != nil {
 		return nil, err
 	}

@@ -321,14 +321,14 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 			},
 		}
 		src := leaf(3)
-		// Every fifth run starts in the month before, three days before
-		// its end: its record is then that month's, and its attempts,
-		// on the real clock, this one's and more than a day later, as an
-		// act step waiting for a person may be (review 56 rounds 1, 2).
+		// Every fifth run is recorded three days into the next month
+		// (Temporal's test clock), more than a day after its attempts
+		// (on the real clock) this month, as a run whose act step waits
+		// for a person may be (review 56 rounds 1, 2 and 4).
 		start := at
 		if i%5 == 0 {
-			start, _ = loom.MonthOf(at, time.UTC)
-			start = start.AddDate(0, 0, -3)
+			_, start = loom.MonthOf(at, time.UTC)
+			start = start.AddDate(0, 0, 3)
 		}
 		succeeded = 0
 		if _, err := ledgerRun(t, s, nil, src, "", start, step); err != nil && succeeded > 0 {
@@ -344,9 +344,8 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 		// Each month on its own, as the Costs page and budgets count:
 		// a run that spans a month's end is still counted once.
 		this, next := loom.MonthOf(at, time.UTC)
-		prev := this.AddDate(0, -1, 0)
-		got, by := counted(t, s, prev, this)
-		got2, by2 := counted(t, s, this, next)
+		got, by := counted(t, s, this, next)
+		got2, by2 := counted(t, s, next, next.AddDate(0, 1, 0))
 		if got.Add(got2) != made {
 			t.Fatalf("%s: counted %+v + %+v (%+v, %+v), but Claude answered %+v", src, got, got2, by, by2, made)
 		}
@@ -578,27 +577,22 @@ func TestInv_ScheduleLookupsAreLogged(t *testing.T) {
 	}
 }
 
-// listingStore counts the refs each listing returns under refs/usage/recorded/.
+// listingStore counts the listings of refs/usage/recorded/.
 type listingStore struct {
 	*warp.Store
-	recorded []string
+	calls int
 }
 
 func (l *listingStore) Refs(ctx context.Context, prefix string) ([]warp.RefInfo, error) {
-	refs, err := l.Store.Refs(ctx, prefix)
-	for _, r := range refs {
-		if strings.HasPrefix(r.Name, loom.LedgerPrefix+"recorded/") {
-			l.recorded = append(l.recorded, r.Name)
-		}
+	if strings.HasPrefix(prefix, loom.LedgerPrefix+"recorded/") {
+		l.calls++
 	}
-	return refs, err
+	return l.Store.Refs(ctx, prefix)
 }
 
 // TestInv_RecordsAreFoundByTheirRun: finding the records that set
-// attempts aside lists only the folders of the runs the window's
-// successful attempts belong to, never every run ever recorded, so a
-// budget check or a page load doesn't slow with the store's history
-// (LOOM-336, review 56 round 3).
+// attempts aside takes one listing a month the window's records may be
+// in, however many runs there are (LOOM-336, review 56 rounds 3, 4).
 func TestInv_RecordsAreFoundByTheirRun(t *testing.T) {
 	s := newStore(t)
 	at := now()
@@ -608,13 +602,46 @@ func TestInv_RecordsAreFoundByTheirRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(_ string, a int32) bool { return a < 2 }}
-	if res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", at, step); err != nil || res.Commit == "" {
-		t.Fatalf("the run: %+v %v", res, err)
+	// Eight runs this month, each a step tried twice, then recorded.
+	for i := 0; i < 8; i++ {
+		wf, out := fmt.Sprintf("loom-news-%d", i), fmt.Sprintf(`{"pirn":1,"text":"%d"}`, i)
+		id := must(warp.HashBlob(ctx, []byte(out)))
+		for a := int32(1); a <= 2; a++ {
+			e := loom.LedgerEntry{Kind: loom.LedgerAttempt, At: at, Workflow: wf + "/plan", Run: "p", Activity: "1", Node: "n0", Step: "ask", Attempt: a, Failed: a == 1, Calls: []pirn.Call{hundred}}
+			if a == 2 {
+				e.Output = id
+			}
+			if err := loom.WriteLedger(ctx, s, e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := loom.NoteRecorded(ctx, s, wf, "r", "", at, p, map[string]string{"n0": out}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ls := &listingStore{Store: s}
-	xs := must(loom.ExtrasBetween(ctx, ls, at.Add(-time.Hour), at.Add(time.Hour), ""))
-	if len(xs) != 1 || xs[0].Kind != loom.ExtraRetry || len(ls.recorded) != 1 {
-		t.Errorf("extras %+v; recorded refs listed: %v", xs, ls.recorded)
+	this, _ := loom.MonthOf(at, time.UTC)
+	xs := must(loom.ExtrasBetween(ctx, ls, this, at.Add(time.Hour), ""))
+	if len(xs) != 8 || xs[0].Kind != loom.ExtraRetry || ls.calls > 2 {
+		t.Errorf("%d extras %+v; %d listings of records", len(xs), xs, ls.calls)
+	}
+}
+
+// TestInv_ALedgerProblemNeverFailsARun: when noting what a record holds
+// keeps failing, Record tries again a few times, then records the run
+// all the same (logged; its successful attempts count twice, never
+// less), so the run ends recorded, never failed (LOOM-337, review 56
+// round 4).
+func TestInv_ALedgerProblemNeverFailsARun(t *testing.T) {
+	s := newStore(t)
+	tries := 0
+	defer loom.SetNoteRecorded(func(context.Context, *warp.Store, string, string, string, time.Time, plan.Plan, map[string]string) error {
+		tries++
+		return errors.New("disk full")
+	})()
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return false }}
+	res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", now(), step)
+	if err != nil || res.Commit == "" || tries != loom.NoteAttempts {
+		t.Errorf("a run whose note fails: %+v %v after %d tries", res, err, tries)
 	}
 }
