@@ -667,6 +667,19 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 	if want := "start signed in as you on forms.example.org"; !strings.Contains(out.String(), want) || strings.Join(loom.ActSignedIn(pl), " ") != "forms.example.org" {
 		t.Errorf("missing %q in:\n%s", want, out.String())
 	}
+	// Review 53, round 2: loom run and loom schedule say so too, before
+	// Temporal is reached.
+	signed := `(act "x" "https://forms.example.org/" :signed-in "forms.example.org")`
+	for _, args := range [][]string{
+		{"run", "-allow-act", "-address", "127.0.0.1:1", signed},
+		{"schedule", "-allow-act", "-address", "127.0.0.1:1", "-name", "signed", "-every", "24h", signed},
+	} {
+		var said bytes.Buffer
+		run(context.Background(), args, &said)
+		if want := "act steps start signed in as you on forms.example.org, with the sign-ins you kept, and always ask before sending\n"; !strings.Contains(said.String(), want) {
+			t.Errorf("%s: %q", args[0], said.String())
+		}
+	}
 	out.Reset()
 	echo := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo", Args: []string{"hi"}}}}
 	printProposal(&out, loom.Proposal{Summary: "Hi.", Program: `(echo "hi")`, Plan: &echo})
@@ -911,6 +924,28 @@ func TestInv_DeleteAllForgetsSignIns(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(home, "notes.txt")); err != nil || string(b) != "mine" {
 		t.Error("delete --all removed a file that wasn't a sign-in")
 	}
+	// A sign-in's key that won't go (a locked keychain) doesn't keep the
+	// other keys: they are deleted, and the command fails saying so
+	// (review 53, round 2).
+	t.Setenv("HEEDLE_SESSIONS", dir)
+	locked := lockedSessions{fakeKeychain{"HEEDLE_PROFILE_EMAIL": "e"}}
+	vault = locked
+	if err := (pirn.Sessions{Dir: dir, Vault: fakeKeychain(locked.fakeKeychain)}).Save(ctx, "forms.example.org", []byte(`{"cookies":[],"origins":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, io.Discard); err == nil || !strings.Contains(err.Error(), "saved sign-ins") || locked.fakeKeychain["HEEDLE_PROFILE_EMAIL"] != "" {
+		t.Errorf("a locked sign-in: %v, left %v", err, locked.fakeKeychain)
+	}
+}
+
+// lockedSessions won't delete a saved sign-in's key.
+type lockedSessions struct{ fakeKeychain }
+
+func (l lockedSessions) Delete(ctx context.Context, name string) error {
+	if strings.HasPrefix(name, "HEEDLE_SESSION_") {
+		return errors.New("the keychain is locked")
+	}
+	return l.fakeKeychain.Delete(ctx, name)
 }
 
 func TestInv_SecretCommandsLeaveDetailsBe(t *testing.T) {

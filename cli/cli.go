@@ -1036,13 +1036,16 @@ func deleteAllSecrets(ctx context.Context, out io.Writer) error {
 		}
 	}
 	// Saved sign-ins go first (roadmap 9.11): each file and its key, and
-	// nothing else in their folder (review 53).
-	if err := (pirn.Sessions{Dir: sessionsDir(), Vault: vault}).ForgetAll(ctx); err != nil {
-		return fmt.Errorf("forgetting your saved sign-ins: %w", err)
+	// nothing else in their folder (review 53). If that fails, every other
+	// key is deleted all the same, and the command fails naming both
+	// (review 53, round 2).
+	forgot := (pirn.Sessions{Dir: sessionsDir(), Vault: vault}).ForgetAll(ctx)
+	if forgot != nil {
+		forgot = fmt.Errorf("forgetting your saved sign-ins: %w", forgot)
 	}
 	n, err := vault.DeleteAll(ctx)
-	if err != nil {
-		return err
+	if err != nil || forgot != nil {
+		return errors.Join(forgot, err)
 	}
 	if n < 0 {
 		fmt.Fprintln(out, "Deleted every heedle key from your keychain, and your saved sign-ins.")
