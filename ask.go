@@ -497,7 +497,7 @@ func (w Writer) AskActivity(ctx context.Context, in AskRequest) (Proposal, error
 				e.At = info.StartedTime.UTC() // the attempt's start, on Temporal's clock
 			}
 		}
-		if wctx, cancel, ok := ledgerContext(ctx, err == nil); !ok {
+		if wctx, cancel, ok := ledgerContext(ctx); !ok {
 			logLedger(ctx, fmt.Errorf("too little time left to note %d front-door calls", len(calls)))
 			cancel()
 		} else {
