@@ -348,7 +348,7 @@ func TestInv_WorkersSayTheirHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(src), "worker.New(") != 1 || !strings.Contains(string(src), "worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store)}))") {
+	if strings.Count(string(src), "worker.New(") != 1 || !strings.Contains(string(src), "worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store), WorkerStopTimeout: loom.WorkerStopTimeout}))") {
 		t.Error("cli.go's worker doesn't start its activities from loom.WorkerContext(*store)")
 	}
 }
