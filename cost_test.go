@@ -354,7 +354,7 @@ func TestInv_ProposalSaysWhatItUsed(t *testing.T) {
 
 // TestInv_CostsSayWhatTheyMiss: the wiki says plainly what costs and
 // budgets still can't see: a skill Claude wrote, a program loom write
-// writes, an attempt whose worker died mid-call; and that a budget can't
+// writes, an attempt whose worker is killed; and that a budget can't
 // stop a run already going. (Review 48: failed runs were invisible to
 // budgets, unsaid; roadmap 10.4.1 counts them, and retries and the front
 // door, from the usage ledger.)
@@ -363,7 +363,7 @@ func TestInv_CostsSayWhatTheyMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"**What still isn't counted:** a skill Claude writes", "a program `loom write` writes", "an attempt whose worker died mid-call", "A budget can't stop a run already going"} {
+	for _, want := range []string{"**What still isn't counted:** a skill Claude writes", "a program `loom write` writes", "an attempt whose worker is killed", "A budget can't stop a run already going"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("How-It-Works doesn't say %q", want)
 		}

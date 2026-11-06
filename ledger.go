@@ -33,7 +33,11 @@ import (
 // never race for one ref (and a conflict never sends a step back to
 // Claude), writing an entry twice is writing it once, and a month is read
 // with two git commands however many entries it has (the refs, then the
-// blobs they name).
+// blobs they name). Which schedule started a run is under
+// LedgerPrefix + "runs/" + the run's ID instead, found by its run however
+// long it goes on. The ledger grows by one ref and three small objects per
+// Claude step attempt, front-door request and scheduled run, and nothing
+// prunes it.
 
 // LedgerPrefix is where the ledger's entries are, one ref each, by the
 // month they were made in (UTC). It is outside refs/loom/, where runs and
@@ -50,7 +54,8 @@ const (
 // LedgerEntry is one entry. Workflow and Run are the execution that made
 // the calls: for an attempt, the plan's workflow (<run>/plan) and its run;
 // for a front-door ask, the ask's; for LedgerRun, the run that Schedule
-// started.
+// started. An attempt carries its run's Schedule, read from the run's
+// LedgerRun entry when it is written.
 type LedgerEntry struct {
 	Ledger   int         `json:"ledger"` // 1
 	Kind     string      `json:"kind"`
@@ -71,7 +76,9 @@ type LedgerEntry struct {
 // same entry.
 func (e LedgerEntry) id() string {
 	key, _ := json.Marshal([]any{e.Kind, e.Workflow, e.Run, e.Activity, e.Node, e.Attempt})
-	if e.Activity == "" && e.Kind != LedgerRun {
+	if e.Kind == LedgerRun {
+		key, _ = json.Marshal([]any{e.Kind, e.Workflow})
+	} else if e.Activity == "" {
 		// Not from an activity (a test, a tool): only its time tells it
 		// from another.
 		key, _ = json.Marshal([]any{e.Kind, e.Workflow, e.Run, e.Node, e.At.UnixNano(), e.Calls})
@@ -80,8 +87,12 @@ func (e LedgerEntry) id() string {
 	return hex.EncodeToString(sum[:20])
 }
 
-// ledgerDir is the folder of e's ref: its month and its ID.
+// ledgerDir is the folder of e's ref: its month (a run's: "runs") and its
+// ID.
 func (e LedgerEntry) ledgerDir() string {
+	if e.Kind == LedgerRun {
+		return LedgerPrefix + "runs/" + e.id() + "/"
+	}
 	return LedgerPrefix + e.At.UTC().Format("2006-01") + "/" + e.id() + "/"
 }
 
@@ -90,6 +101,12 @@ func (e LedgerEntry) ledgerDir() string {
 // done. It is for activities only.
 func WriteLedger(ctx context.Context, s *warp.Store, e LedgerEntry) error {
 	e.Ledger = 1
+	// Already written, with this content or another: written.
+	if have, err := s.Refs(ctx, e.ledgerDir()); err != nil {
+		return err
+	} else if len(have) > 0 {
+		return nil
+	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
@@ -107,16 +124,8 @@ func WriteLedger(ctx context.Context, s *warp.Store, e LedgerEntry) error {
 	if err != nil {
 		return err
 	}
-	// Already written, with this content or another: written.
-	if have, err := s.Refs(ctx, e.ledgerDir()); err != nil {
-		return err
-	} else if len(have) > 0 {
-		return nil
-	}
 	ref := e.ledgerDir() + string(blob)
 	if err := s.Advance(ctx, ref, "", commit); err != nil {
-		// Its ID is what it is about: already there is already written
-		// (a retried budget check's marker, say).
 		if _, ok, rerr := s.Resolve(ctx, ref); rerr == nil && ok {
 			return nil
 		}
@@ -125,11 +134,41 @@ func WriteLedger(ctx context.Context, s *warp.Store, e LedgerEntry) error {
 	return nil
 }
 
+// scheduleOfRun is the schedule that started the run of workflow, as its
+// LedgerRun entry says; "" if none does.
+func scheduleOfRun(ctx context.Context, s Records, workflow string) (string, error) {
+	refs, err := s.Refs(ctx, LedgerEntry{Kind: LedgerRun, Workflow: workflow}.ledgerDir())
+	if err != nil || len(refs) == 0 {
+		return "", err
+	}
+	b := warp.ID(refs[0].Name[strings.LastIndex(refs[0].Name, "/")+1:])
+	if !ledgerBlob.MatchString(string(b)) {
+		return "", nil
+	}
+	bs, err := s.Blobs(ctx, []warp.ID{b})
+	if err != nil {
+		return "", err
+	}
+	var e LedgerEntry
+	if json.Unmarshal(bs[0], &e) != nil || e.Kind != LedgerRun {
+		return "", nil
+	}
+	return e.Schedule, nil
+}
+
 // ledgerBlob is what a ledger ref's last part must be: a blob ID.
 var ledgerBlob = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 
+// LedgerUnreadable is the Kind ReadLedger gives an entry it can't read:
+// its calls are unknown, so it counts as a step with no counts, and a
+// budget that meets one can't be checked (as for a record that can't be
+// read).
+const LedgerUnreadable = "unreadable"
+
 // ReadLedger is the entries made at or after from and before to, oldest
-// first.
+// first, the first written under each ID. One it can't read (not JSON,
+// another version, a ref that doesn't name a blob) is LedgerUnreadable,
+// at the start of its month, with Workflow naming its ref.
 func ReadLedger(ctx context.Context, s Records, from, to time.Time) ([]LedgerEntry, error) {
 	var out []LedgerEntry
 	for m := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC); m.Before(to); m = m.AddDate(0, 1, 0) {
@@ -138,11 +177,26 @@ func ReadLedger(ctx context.Context, s Records, from, to time.Time) ([]LedgerEnt
 			return nil, err
 		}
 		var ids []warp.ID
-		for _, r := range refs {
-			// .../<month>/<id>/<entry.json's blob ID>
-			if b := warp.ID(r.Name[strings.LastIndex(r.Name, "/")+1:]); ledgerBlob.MatchString(string(b)) {
-				ids = append(ids, b)
+		var names []string
+		seen := map[string]bool{}
+		bad := func(name string) {
+			if !m.Before(from) && m.Before(to) {
+				out = append(out, LedgerEntry{Kind: LedgerUnreadable, At: m, Workflow: name})
 			}
+		}
+		for _, r := range refs {
+			// .../<month>/<id>/<entry.json's blob ID>: the first under
+			// each ID (two writers racing may have left two).
+			dir, b := r.Name[:strings.LastIndex(r.Name, "/")], r.Name[strings.LastIndex(r.Name, "/")+1:]
+			if seen[dir] {
+				continue
+			}
+			seen[dir] = true
+			if !ledgerBlob.MatchString(b) {
+				bad(r.Name)
+				continue
+			}
+			ids, names = append(ids, warp.ID(b)), append(names, r.Name)
 		}
 		if len(ids) == 0 {
 			continue
@@ -151,10 +205,11 @@ func ReadLedger(ctx context.Context, s Records, from, to time.Time) ([]LedgerEnt
 		if err != nil {
 			return nil, err
 		}
-		for _, b := range bs {
+		for i, b := range bs {
 			var e LedgerEntry
-			if err := json.Unmarshal(b, &e); err != nil || e.Ledger != 1 {
-				continue // not one this loom wrote
+			if err := json.Unmarshal(b, &e); err != nil || e.Ledger != 1 || e.At.IsZero() {
+				bad(names[i])
+				continue
 			}
 			if !e.At.Before(from) && e.At.Before(to) {
 				out = append(out, e)
@@ -168,19 +223,22 @@ func ReadLedger(ctx context.Context, s Records, from, to time.Time) ([]LedgerEnt
 // Kinds of Extra, as the Costs page names them.
 const (
 	ExtraFrontDoor = "front door"  // the front door's own asks
-	ExtraRetry     = "retries"     // attempts that failed and were tried again
-	ExtraFailedRun = "failed runs" // calls of runs with no record of them: failed (or not yet recorded)
+	ExtraRetry     = "retries"     // attempts tried again: failed, or whose success came too late
+	ExtraFailedRun = "failed runs" // calls of runs with no record of them: failed, or still going
 )
 
 // Extra is usage the ledger adds to what records hold: one entry's calls.
 // Workflow is the run they belong to (for front-door asks, the ask's), and
-// Schedule the schedule that started it, when the ledger knows.
+// Schedule the schedule that started it, when the ledger knows. An
+// unreadable entry is Unreadable: one step with no counts, charged to
+// every schedule, so a budget that meets it pauses rather than guess.
 type Extra struct {
-	Kind     string    `json:"kind"`
-	Workflow string    `json:"workflowId,omitempty"`
-	Schedule string    `json:"schedule,omitempty"`
-	At       time.Time `json:"at"`
-	Usage    Usage     `json:"usage"`
+	Kind       string    `json:"kind"`
+	Workflow   string    `json:"workflowId,omitempty"`
+	Schedule   string    `json:"schedule,omitempty"`
+	At         time.Time `json:"at"`
+	Usage      Usage     `json:"usage"`
+	Unreadable bool      `json:"unreadable,omitempty"`
 }
 
 // runOf is the run a plan's workflow belongs to.
@@ -190,26 +248,22 @@ func runOf(workflow string) string { return strings.TrimSuffix(workflow, "/plan"
 // once: every front-door ask; every failed attempt, as a retry if the
 // same step was tried again and else as a failed run's; and every
 // successful attempt no record holds (its exact output, at that node of
-// that run, isn't in runs), as a failed run's. A successful attempt a
-// record holds is set aside: the record counts it. Pure: a function of
-// what is written.
+// that run, isn't in runs), as a retry if the step was tried again and
+// else as a failed run's. A successful attempt a record holds is set
+// aside: the record counts it. runs must include every record the
+// entries' runs may have, whenever it was made (ExtrasBetween reads them
+// with a margin either side). Pure: a function of what is written.
 func Extras(entries []LedgerEntry, runs []RunUsage) []Extra {
-	schedule := map[string]string{}
 	later := map[string]int32{} // the last attempt of each step
-	type stepKey struct{ wf, run, node string }
+	stepKey := func(e LedgerEntry) string { return e.Workflow + "\x00" + e.Run + "\x00" + e.Node }
 	for _, e := range entries {
-		switch e.Kind {
-		case LedgerRun:
-			schedule[e.Workflow] = e.Schedule
-		case LedgerAttempt:
-			k := fmt.Sprint(stepKey{e.Workflow, e.Run, e.Node})
-			if e.Attempt > later[k] {
-				later[k] = e.Attempt
-			}
+		if e.Kind == LedgerAttempt && e.Attempt > later[stepKey(e)] {
+			later[stepKey(e)] = e.Attempt
 		}
 	}
 	// Each recorded output may set aside one successful attempt.
 	recorded := map[string]int{}
+	schedule := map[string]string{}
 	for _, r := range runs {
 		for node, id := range r.Outputs {
 			recorded[r.Workflow+"\x00"+node+"\x00"+string(id)]++
@@ -220,21 +274,26 @@ func Extras(entries []LedgerEntry, runs []RunUsage) []Extra {
 	}
 	var out []Extra
 	for _, e := range entries {
-		if len(e.Calls) == 0 {
-			continue
-		}
-		x := Extra{Workflow: runOf(e.Workflow), At: e.At, Usage: callsUsage(e)}
+		x := Extra{Workflow: runOf(e.Workflow), At: e.At}
 		switch e.Kind {
+		case LedgerUnreadable:
+			x.Kind, x.Workflow, x.Unreadable = ExtraFailedRun, e.Workflow, true
+			x.Usage = Usage{Steps: []StepUsage{{Node: e.Workflow, Kind: "ledger", Missing: "this usage-ledger entry can't be read, so its calls aren't known"}}}
+			out = append(out, x)
+			continue
 		case LedgerFrontDoor:
 			x.Kind, x.Workflow = ExtraFrontDoor, e.Workflow
 		case LedgerAttempt:
-			x.Schedule = schedule[x.Workflow]
+			x.Schedule = e.Schedule
+			if x.Schedule == "" {
+				x.Schedule = schedule[x.Workflow]
+			}
 			k := x.Workflow + "\x00" + e.Node + "\x00" + string(e.Output)
 			switch {
-			case !e.Failed && recorded[k] > 0:
+			case !e.Failed && e.Output != "" && recorded[k] > 0:
 				recorded[k]--
 				continue // the record counts it
-			case e.Failed && e.Attempt < later[fmt.Sprint(stepKey{e.Workflow, e.Run, e.Node})]:
+			case e.Attempt < later[stepKey(e)]:
 				x.Kind = ExtraRetry
 			default:
 				x.Kind = ExtraFailedRun
@@ -242,6 +301,10 @@ func Extras(entries []LedgerEntry, runs []RunUsage) []Extra {
 		default:
 			continue
 		}
+		if len(e.Calls) == 0 {
+			continue
+		}
+		x.Usage = callsUsage(e)
 		out = append(out, x)
 	}
 	return out
@@ -270,18 +333,25 @@ func callsUsage(e LedgerEntry) Usage {
 }
 
 // ExtrasBetween is the ledger's Extras for calls made at or after from
-// and before to, given the runs recorded then (AllRunsBetween's, or one
-// schedule's RunsBetween), and, given schedule, only that schedule's.
-func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, runs []RunUsage, schedule string) ([]Extra, error) {
-	// A run's marker is written when it starts, so look a day further
-	// back for those of runs that started before from.
-	entries, err := ReadLedger(ctx, s, from.Add(-recordSlack), to)
+// and before to, and, given schedule, only that schedule's (and any
+// entry that can't be read). Successful attempts are set aside against
+// every run recorded a day either side of the window, so a run that
+// spans a month's end is counted once: in the month of its record.
+func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, schedule string) ([]Extra, error) {
+	entries, err := ReadLedger(ctx, s, from, to)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	runs, err := AllRunsBetween(ctx, s, from.Add(-recordSlack), to.Add(recordSlack))
 	if err != nil {
 		return nil, err
 	}
 	var out []Extra
 	for _, x := range Extras(entries, runs) {
-		if !x.At.Before(from) && (schedule == "" || x.Schedule == schedule) {
+		if schedule == "" || x.Schedule == schedule || x.Unreadable {
 			out = append(out, x)
 		}
 	}
@@ -293,9 +363,35 @@ func ExtrasBetween(ctx context.Context, s Records, from, to time.Time, runs []Ru
 // ledger of store: the calls Claude answered during it (pirn's Meter),
 // whether it succeeded, and if it did, its output's blob ID, so the
 // record that holds that output is what counts it. The entry is written
-// even when the attempt fails or is cancelled; a write that fails is
-// logged, and never fails the step or sends it back to Claude.
+// even when the attempt fails or is cancelled. A write that fails is
+// logged, and never fails the step; a successful attempt's write never
+// runs past the activity's deadline (it is skipped, and logged, if too
+// little time is left), so it never sends the step back to Claude. A
+// Claude step registered as anything but func(context.Context,
+// plan.Input) (string, error) can't be counted, and panics.
 func Counted(w Activities, store *warp.Store) Activities { return counted{w, store} }
+
+// IsCounted reports whether a, as Counted registered it, counts its
+// attempts in the ledger.
+func IsCounted(a any) bool {
+	f, ok := a.(countedStep)
+	return ok && f != nil
+}
+
+// countedStep is a Claude step's activity as Counted registers it.
+type countedStep func(context.Context, plan.Input) (string, error)
+
+// WorkerStopTimeout is how long a worker that is stopping (heedle down,
+// Ctrl-C) lets its running steps go on before it cancels them: long
+// enough for most to finish and note their calls in the ledger. A step
+// still running then is cancelled, and notes its calls if the worker is
+// still there to; a worker that is killed notes nothing of the attempts
+// it was running.
+const WorkerStopTimeout = 45 * time.Second
+
+// LedgerMargin is how much of a successful attempt's time a ledger write
+// leaves before its deadline; with less left, the write is skipped.
+var LedgerMargin = 5 * time.Second
 
 type counted struct {
 	w     Activities
@@ -304,8 +400,12 @@ type counted struct {
 
 func (c counted) RegisterActivityWithOptions(a any, o activity.RegisterOptions) {
 	kind, claude := claudeKinds[o.Name]
-	if f, ok := a.(func(context.Context, plan.Input) (string, error)); ok && claude && c.store != nil {
-		a = func(ctx context.Context, in plan.Input) (string, error) {
+	if claude && c.store != nil {
+		f, ok := a.(func(context.Context, plan.Input) (string, error))
+		if !ok {
+			panic(fmt.Sprintf("loom: Counted can't count %s, registered as %T", o.Name, a))
+		}
+		a = countedStep(func(ctx context.Context, in plan.Input) (string, error) {
 			m := &pirn.Meter{}
 			out, err := f(pirn.WithMeter(ctx, m), in)
 			calls := m.Calls()
@@ -320,22 +420,47 @@ func (c counted) RegisterActivityWithOptions(a any, o activity.RegisterOptions) 
 					e.At = info.StartedTime.UTC() // the attempt's start, on Temporal's clock
 				}
 			}
-			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			wctx, cancel, ok := ledgerContext(ctx, err == nil)
 			defer cancel()
+			if !ok {
+				logLedger(ctx, fmt.Errorf("too little time left to note %d calls of step %s", len(calls), in.NodeID))
+				return out, err
+			}
 			if err == nil {
 				id, herr := warp.HashBlob(wctx, []byte(out))
 				if herr != nil {
+					// Without its output it couldn't be set aside, and would
+					// count twice: not written (review 56).
 					logLedger(ctx, herr)
+					return out, err
 				}
 				e.Output = id
+			}
+			if e.Schedule, _ = scheduleOfRun(wctx, c.store, runOf(e.Workflow)); e.Workflow == "" {
+				e.Schedule = ""
 			}
 			if werr := WriteLedger(wctx, c.store, e); werr != nil {
 				logLedger(ctx, werr)
 			}
 			return out, err
-		}
+		})
 	}
 	c.w.RegisterActivityWithOptions(a, o)
+}
+
+// ledgerContext is the context a ledger write runs in: not cancelled with
+// ctx (a cancelled attempt is still noted), for at most 30 seconds, and,
+// when the activity must still return a result (mustReturn: it
+// succeeded), ending LedgerMargin before its deadline, so a late write
+// never makes Temporal try it again and ask Claude again (review 56). ok
+// is false when that leaves no time.
+func ledgerContext(ctx context.Context, mustReturn bool) (context.Context, context.CancelFunc, bool) {
+	end := time.Now().Add(30 * time.Second)
+	if d, ok := ctx.Deadline(); ok && mustReturn && d.Add(-LedgerMargin).Before(end) {
+		end = d.Add(-LedgerMargin)
+	}
+	wctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), end)
+	return wctx, cancel, time.Now().Before(end)
 }
 
 func logLedger(ctx context.Context, err error) {

@@ -497,11 +497,15 @@ func (w Writer) AskActivity(ctx context.Context, in AskRequest) (Proposal, error
 				e.At = info.StartedTime.UTC() // the attempt's start, on Temporal's clock
 			}
 		}
-		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		if werr := WriteLedger(wctx, w.Ledger, e); werr != nil {
-			logLedger(ctx, werr)
+		if wctx, cancel, ok := ledgerContext(ctx, err == nil); !ok {
+			logLedger(ctx, fmt.Errorf("too little time left to note %d front-door calls", len(calls)))
+			cancel()
+		} else {
+			if werr := WriteLedger(wctx, w.Ledger, e); werr != nil {
+				logLedger(ctx, werr)
+			}
+			cancel()
 		}
-		cancel()
 	}
 	switch {
 	case errors.Is(err, pirn.ErrInvalid):

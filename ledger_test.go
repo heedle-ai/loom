@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	"github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/loom"
 	"github.com/heedle-ai/pirn"
 	"github.com/heedle-ai/shuttle"
@@ -65,7 +68,7 @@ func ledgerRun(t *testing.T, s *warp.Store, sc loom.ScheduleControl, src, schedu
 	runs++
 	env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: fmt.Sprintf("loom-test-%d", runs)})
 	loom.RegisterWith(env, &loom.Checker{Registry: reg}, &loom.Recorder{Store: s, Schedules: sc})
-	loom.Counted(loom.Labelled(env), s).RegisterActivityWithOptions(shuttle.ArrowAsActivity(step.run), activity.RegisterOptions{Name: pirn.ActivityName})
+	loom.Labelled(loom.Counted(env, s)).RegisterActivityWithOptions(shuttle.ArrowAsActivity(step.run), activity.RegisterOptions{Name: pirn.ActivityName})
 	if schedule != "" {
 		env.SetTypedSearchAttributesOnStart(temporal.NewSearchAttributes(temporal.NewSearchAttributeKeyKeyword("TemporalScheduledById").ValueSet(loom.SchedulePrefix + schedule)))
 	}
@@ -89,11 +92,18 @@ func counted(t *testing.T, s *warp.Store, from, to time.Time) (loom.Tokens, map[
 		by["record"] = by["record"].Add(r.Usage.Total())
 		total = total.Add(r.Usage.Total())
 	}
-	for _, x := range must(loom.ExtrasBetween(ctx, s, from, to, runs, "")) {
+	for _, x := range must(loom.ExtrasBetween(ctx, s, from, to, "")) {
 		by[x.Kind] = by[x.Kind].Add(x.Usage.Total())
 		total = total.Add(x.Usage.Total())
 	}
 	return total, by
+}
+
+// nodeSeed is a node's own number, for seeding what its attempts do.
+func nodeSeed(node string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(node))
+	return int64(h.Sum64())
 }
 
 // now is the time the tests' runs start: Temporal's test environment
@@ -172,8 +182,10 @@ func TestInv_FrontDoorAsksAreCounted(t *testing.T) {
 	if want := (loom.Tokens{Input: 5000, Output: 500}); total != want || by[loom.ExtraFrontDoor] != want {
 		t.Errorf("counted %+v: %+v", total, by)
 	}
-	start, end := loom.MonthOf(time.Now(), time.UTC)
-	if xs := must(loom.ExtrasBetween(ctx, s, start, end, nil, "")); len(xs) != 2 || xs[0].Kind != loom.ExtraFrontDoor {
+	// The month the asks were made in (review 56: not the month after).
+	es := must(loom.ReadLedger(ctx, s, from, time.Now().UTC().Add(time.Hour)))
+	start, end := loom.MonthOf(es[0].At, time.UTC)
+	if xs := must(loom.ExtrasBetween(ctx, s, start, end, "")); len(xs) != 2 || xs[0].Kind != loom.ExtraFrontDoor {
 		t.Errorf("this month's extras: %+v", xs)
 	}
 }
@@ -230,7 +242,7 @@ func TestInv_TheLedgerIsItsOwn(t *testing.T) {
 	refs := must(s.Refs(ctx, "refs/"))
 	// refs/usage/<month>/<the entry's ID>/<entry.json's blob ID>: a month
 	// is read from its refs' names and one batch of blobs.
-	shape := regexp.MustCompile(`^refs/usage/2026-11/[0-9a-f]{40}/[0-9a-f]{40,64}$`)
+	shape := regexp.MustCompile(`^refs/usage/` + at.Format("2006-01") + `/[0-9a-f]{40}/[0-9a-f]{40,64}$`)
 	if len(refs) != 1 || !shape.MatchString(refs[0].Name) || strings.HasPrefix(refs[0].Name, "refs/loom/") {
 		t.Errorf("refs: %+v", refs)
 	}
@@ -261,6 +273,7 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 	models := []string{"claude-sonnet-5-5", "claude-haiku-5-5"}
 	at := now()
 	all := map[string]loom.Tokens{}
+	partly, succeeded := 0, 0
 	for i := 0; i < 40; i++ {
 		// Each trial its own store: Temporal's test environment gives
 		// every run the same run ID, which a store records once.
@@ -270,7 +283,7 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 		seed := r.Int63()
 		step := claudeStep{
 			calls: func(node string, attempt int32) []pirn.Call {
-				rr := rand.New(rand.NewSource(seed ^ int64(len(node))<<8 ^ int64(attempt)))
+				rr := rand.New(rand.NewSource(seed ^ nodeSeed(node)<<8 ^ int64(attempt)))
 				var cs []pirn.Call
 				for n := rr.Intn(4); n > 0; n-- {
 					c := pirn.Call{Model: models[rr.Intn(2)], Input: int64(rr.Intn(5000)), Output: int64(rr.Intn(500))}
@@ -282,11 +295,27 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 				return cs
 			},
 			fail: func(node string, attempt int32) bool {
-				return rand.New(rand.NewSource(seed^int64(len(node))<<16^int64(attempt)<<1)).Intn(3) == 0
+				failed := rand.New(rand.NewSource(seed^nodeSeed(node)<<16^int64(attempt)<<1)).Intn(3) == 0
+				mu.Lock()
+				if !failed {
+					succeeded++
+				}
+				mu.Unlock()
+				return failed
 			},
 		}
 		src := leaf(3)
-		ledgerRun(t, s, nil, src, "", at, step)
+		// Every fifth run starts in the month before (its record is
+		// then that month's, its attempts this one's: review 56).
+		start := at
+		if i%5 == 0 {
+			start, _ = loom.MonthOf(at, time.UTC)
+			start = start.Add(-time.Minute)
+		}
+		succeeded = 0
+		if _, err := ledgerRun(t, s, nil, src, "", start, step); err != nil && succeeded > 0 {
+			partly++
+		}
 		if r.Intn(3) == 0 {
 			a := &meteredAsker{scripted{replies: []string{"no JSON here", "```json\n{\"summary\": \"Hi.\", \"program\": \"(echo \\\"hi\\\")\"}\n```"}}}
 			w := writer(a)
@@ -294,16 +323,163 @@ func TestLaw_EveryCallIsCountedOnce(t *testing.T) {
 			w.AskActivity(ctx, loom.AskRequest{Request: "say hi"})
 			made = made.Add(loom.Tokens{Input: 1000 * int64(len(a.asked)), Output: 100 * int64(len(a.asked))})
 		}
-		got, by := counted(t, s, at.Add(-time.Hour), time.Now().Add(time.Hour))
-		if got != made {
-			t.Fatalf("%s: counted %+v (%+v), but Claude answered %+v", src, got, by, made)
+		// Each month on its own, as the Costs page and budgets count:
+		// a run that spans a month's end is still counted once.
+		this, next := loom.MonthOf(at, time.UTC)
+		prev := this.AddDate(0, -1, 0)
+		got, by := counted(t, s, prev, this)
+		got2, by2 := counted(t, s, this, next)
+		if got.Add(got2) != made {
+			t.Fatalf("%s: counted %+v + %+v (%+v, %+v), but Claude answered %+v", src, got, got2, by, by2, made)
 		}
-		for k, v := range by {
-			all[k] = all[k].Add(v)
+		for _, b := range []map[string]loom.Tokens{by, by2} {
+			for k, v := range b {
+				all[k] = all[k].Add(v)
+			}
 		}
 	}
 	by := all
+	if partly == 0 {
+		t.Error("no run failed after some of its steps succeeded")
+	}
 	if by["record"] == (loom.Tokens{}) || by[loom.ExtraRetry] == (loom.Tokens{}) || by[loom.ExtraFailedRun] == (loom.Tokens{}) || by[loom.ExtraFrontDoor] == (loom.Tokens{}) {
 		t.Errorf("not every kind of call was tried: %+v", by)
+	}
+}
+
+// recordingActivities keeps what was registered, by name.
+type recordingActivities map[string]any
+
+func (r recordingActivities) RegisterActivityWithOptions(a any, o activity.RegisterOptions) {
+	r[o.Name] = a
+}
+
+// TestInv_SuccessNeverWaitsOnTheLedger: a successful attempt with too
+// little of its time left returns at once, its calls not noted, rather
+// than run past its deadline and be tried again (asking Claude again); a
+// failed one is still noted; a Claude step Counted can't wrap panics
+// rather than go uncounted (LOOM-327, review 56).
+func TestInv_SuccessNeverWaitsOnTheLedger(t *testing.T) {
+	s := newStore(t)
+	reg := recordingActivities{}
+	step := func(fail bool) func(context.Context, plan.Input) (string, error) {
+		return func(ctx context.Context, in plan.Input) (string, error) {
+			pirn.MeterFrom(ctx).Add(hundred)
+			if fail {
+				return "", errors.New("overloaded")
+			}
+			return `{"pirn":1}`, nil
+		}
+	}
+	loom.Counted(reg, s).RegisterActivityWithOptions(step(false), activity.RegisterOptions{Name: pirn.ActivityName})
+	loom.Counted(reg, s).RegisterActivityWithOptions(step(true), activity.RegisterOptions{Name: pirn.AgentActivityName})
+	short, cancel := context.WithTimeout(ctx, loom.LedgerMargin/2)
+	defer cancel()
+	start := time.Now()
+	ask := reflectCall(reg[pirn.ActivityName])
+	if out, err := ask(short, plan.Input{NodeID: "n0"}); err != nil || out == "" || time.Since(start) > time.Second {
+		t.Errorf("a success near its deadline: %q %v after %v", out, err, time.Since(start))
+	}
+	if es := must(loom.ReadLedger(ctx, s, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))); len(es) != 0 {
+		t.Errorf("noted with no time left: %+v", es)
+	}
+	agent := reflectCall(reg[pirn.AgentActivityName])
+	if _, err := agent(short, plan.Input{NodeID: "n1"}); err == nil {
+		t.Fatal("the failing step succeeded")
+	}
+	if es := must(loom.ReadLedger(ctx, s, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))); len(es) != 1 || !es[0].Failed {
+		t.Errorf("a failed attempt near its deadline wasn't noted: %+v", es)
+	}
+	if !loom.IsCounted(reg[pirn.ActivityName]) || loom.IsCounted(step(false)) {
+		t.Error("IsCounted doesn't tell a counted step")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("a Claude step of another type was registered uncounted")
+		}
+	}()
+	type named func(context.Context, plan.Input) (string, error)
+	loom.Counted(reg, s).RegisterActivityWithOptions(named(step(false)), activity.RegisterOptions{Name: pirn.ActActivityName})
+}
+
+// reflectCall calls a counted step whatever its named type.
+func reflectCall(a any) func(context.Context, plan.Input) (string, error) {
+	v := reflect.ValueOf(a)
+	return func(ctx context.Context, in plan.Input) (string, error) {
+		out := v.Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(in)})
+		err, _ := out[1].Interface().(error)
+		return out[0].String(), err
+	}
+}
+
+// TestInv_LongRunsKeepTheirSchedule: a scheduled run's calls are its
+// schedule's however long after its start they're made, in another month
+// even: the schedule is found by the run (LOOM-328, review 56: a run
+// longer than a day lost its schedule, and its budget failed open).
+func TestInv_LongRunsKeepTheirSchedule(t *testing.T) {
+	s := newStore(t)
+	sc := &schedules{budget: map[string]loom.ScheduleBudget{"news": {Budget: loom.Budget{USD: 100}}}}
+	started := now().AddDate(0, 0, -40)
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return true }}
+	if _, err := ledgerRun(t, s, sc, `(ask "the news")`, "news", started, step); err == nil {
+		t.Fatal("the run should fail")
+	}
+	this, next := loom.MonthOf(time.Now(), time.UTC)
+	xs := must(loom.ExtrasBetween(ctx, s, this, next, "news"))
+	if len(xs) != 3 || xs[0].Schedule != "news" {
+		t.Errorf("this month's calls of news: %+v", xs)
+	}
+}
+
+// TestInv_UnreadableEntriesFailClosed: a ledger entry that can't be read
+// is a step with no counts, charged to every schedule, so a budget that
+// meets one pauses its schedule saying so, rather than leave its calls
+// out (LOOM-329, review 56).
+func TestInv_UnreadableEntriesFailClosed(t *testing.T) {
+	s := newStore(t)
+	at := now()
+	blob := must(s.PutBlob(ctx, []byte("not an entry")))
+	tree := must(s.PutTree(ctx, []warp.Entry{{Name: "entry.json", Kind: warp.KindBlob, ID: blob}}))
+	commit := must(s.Commit(ctx, warp.CommitSpec{Tree: tree, Message: "usage: ?", Author: warp.Signature{Name: "x", Email: "x@y", When: at}}))
+	if err := s.Advance(ctx, loom.LedgerPrefix+at.Format("2006-01")+"/"+strings.Repeat("a", 40)+"/"+string(blob), "", commit); err != nil {
+		t.Fatal(err)
+	}
+	this, next := loom.MonthOf(at, time.UTC)
+	xs := must(loom.ExtrasBetween(ctx, s, this, next, "news"))
+	if len(xs) != 1 || !xs[0].Unreadable || len(xs[0].Usage.Missing()) != 1 {
+		t.Fatalf("an unreadable entry: %+v", xs)
+	}
+	sc := &schedules{budget: map[string]loom.ScheduleBudget{"news": {Budget: loom.Budget{USD: 100}}}}
+	cheap := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return false }}
+	res, err := ledgerRun(t, s, sc, `(ask "the news")`, "news", at, cheap)
+	if err != nil || !strings.Contains(res.Skipped, "no estimate") || !sc.budget["news"].Paused {
+		t.Errorf("a budget meeting an unreadable entry: %+v %v", res, err)
+	}
+}
+
+// TestInv_AProposalRunIsCountedOnce: asking the front door and running
+// what it proposed counts every call once: the asks from the ledger, the
+// run's from its record; the proposal's own usage (shown on its card) is
+// in no record (LOOM-330, review 56).
+func TestInv_AProposalRunIsCountedOnce(t *testing.T) {
+	s := newStore(t)
+	from := now().Add(-time.Hour)
+	a := &meteredAsker{scripted{replies: []string{"```json\n{\"summary\": \"The news.\", \"program\": \"(ask \\\"the news\\\")\"}\n```"}}}
+	w := writer(a)
+	w.Ledger = s
+	w.Commands = func(context.Context) (*registry.Registry, []loom.Command, error) {
+		reg := claudeRegistry(t)
+		return reg, loom.Commands(reg, loom.BuiltinCommands), nil
+	}
+	p, err := w.AskActivity(ctx, loom.AskRequest{Request: "the news"})
+	if err != nil || p.Usage == nil {
+		t.Fatalf("%+v %v", p, err)
+	}
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(string, int32) bool { return false }}
+	if _, err := ledgerRun(t, s, nil, p.Program, "", now(), step); err != nil {
+		t.Fatal(err)
+	}
+	if got, by := counted(t, s, from, time.Now().Add(time.Hour)); got != (loom.Tokens{Input: 1100, Output: 110}) {
+		t.Errorf("counted %+v: %+v", got, by)
 	}
 }

@@ -98,7 +98,7 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 	}
 	// And the calls no record holds, from the usage ledger: front-door
 	// asks, retried attempts, failed runs (roadmap 10.4.1).
-	extras, err := loom.ExtrasBetween(ctx, s, from, to, runs, "")
+	extras, err := loom.ExtrasBetween(ctx, s, from, to, "")
 	if err != nil {
 		return err
 	}
@@ -148,12 +148,12 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 			return keys[i].schedule < keys[j].schedule
 		}
 		if keys[i].kind != keys[j].kind {
-			return keys[i].kind > keys[j].kind // recorded first
+			return kindOrder[keys[i].kind] < kindOrder[keys[j].kind]
 		}
 		return keys[i].model < keys[j].model
 	})
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "SCHEDULE\tCALLS\tMODEL\tRUNS\tINPUT\tOUTPUT\tEST.")
+	fmt.Fprintln(tw, "SCHEDULE\tKIND\tMODEL\tRUNS\tINPUT\tOUTPUT\tEST.")
 	for _, k := range keys {
 		r := rows[k]
 		sched := k.schedule
@@ -185,6 +185,10 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 	}
 	return nil
 }
+
+// kindOrder is the order of kinds of call in loom costs: what records
+// hold, then the ledger's, as the Costs page lists them.
+var kindOrder = map[string]int{"recorded": 0, loom.ExtraFrontDoor: 1, loom.ExtraRetry: 2, loom.ExtraFailedRun: 3}
 
 // printProposalUsage says what proposing used of Claude, as counted.
 func printProposalUsage(out io.Writer, u *loom.Usage) {
