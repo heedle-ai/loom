@@ -156,3 +156,26 @@ func DecideForm(ctx context.Context, c client.Client, workflowID string, d FormD
 	}
 	return fmt.Errorf("%w: no form %q waits to be sent in %s", pirn.ErrInvalid, d.ID, workflowID)
 }
+
+// PendingWheels are the act steps of run workflowID waiting for a person
+// to take the wheel (roadmap 9.10), read from their heartbeats (its plan,
+// "<run>/plan"): each with Claude's reason. Driving the browser isn't
+// through Temporal: only the machine whose worker runs the step can.
+func PendingWheels(ctx context.Context, c client.Client, workflowID string) ([]pirn.ActWheel, error) {
+	d, err := c.DescribeWorkflowExecution(ctx, workflowID+"/plan", "")
+	if err != nil {
+		return nil, err
+	}
+	var out []pirn.ActWheel
+	for _, a := range d.PendingActivities {
+		if a.GetActivityType().GetName() != pirn.ActActivityName || a.GetHeartbeatDetails() == nil {
+			continue
+		}
+		var b pirn.ActBeat
+		if converter.GetDefaultDataConverter().FromPayloads(a.GetHeartbeatDetails(), &b) != nil || b.Wheel == nil {
+			continue
+		}
+		out = append(out, *b.Wheel)
+	}
+	return out, nil
+}

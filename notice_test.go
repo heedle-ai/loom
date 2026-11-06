@@ -101,7 +101,9 @@ func TestInv_NoticesAreToldOnce(t *testing.T) {
 	c.On("QueryWorkflow", mock.Anything, "loom-e", "", loom.WritesQuery).Return(v, nil)
 	// An act step waits to send a form (roadmap 9.7).
 	beat, _ := dc.ToPayloads(pirn.ActBeat{Frame: reed.Frame{URL: "https://forms.example.org/x", JPEG: []byte{0xff, 0xd8}},
-		Pending: &pirn.ActPending{ID: "f00d", Node: "n2", Summary: "Name Ada, email ada@example.org.", URL: "https://forms.example.org/x"}})
+		Pending: &pirn.ActPending{ID: "f00d", Node: "n2", Summary: "Name Ada, email ada@example.org.", URL: "https://forms.example.org/x"},
+		// And one waits for a person to take the wheel (roadmap 9.10).
+		Wheel: &pirn.ActWheel{ID: "beef", Node: "n2", Reason: "The form asks me to sign in.", URL: "https://forms.example.org/x"}})
 	c.On("DescribeWorkflowExecution", mock.Anything, "loom-e/plan", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
 		PendingActivities: []*workflow.PendingActivityInfo{{ActivityType: &common.ActivityType{Name: pirn.ActActivityName}, HeartbeatDetails: beat}},
 	}, nil)
@@ -123,6 +125,7 @@ func TestInv_NoticesAreToldOnce(t *testing.T) {
 		"heedle: digest didn't finish | Its run was canceled.",
 		"heedle: a write waits for you | mail/send, from step n1. Approve or decline it.",
 		"heedle: a form is ready to send | Name Ada, email ada@example.org. From step n2. Send or cancel it.",
+		"heedle needs you | Claude says: “The form asks me to sign in.” From step n2. Take the wheel on the run page.",
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") || got[0].Workflow != "loom-a-2026" || got[0].Run != "r1" || got[3].Workflow != "loom-e" {
 		t.Errorf("notices:\n%s", strings.Join(lines, "\n"))
@@ -149,14 +152,14 @@ func TestInv_NoticesAreToldOnce(t *testing.T) {
 	many := &loom.Watcher{Client: c, Queue: "loom", Since: now.Add(-time.Minute)}
 	first, _ := many.Check(ctx)
 	rest, _ := many.Check(ctx)
-	if len(first) != 252 || len(rest) != 0 { // 250 runs, the waiting write and the waiting form
+	if len(first) != 253 || len(rest) != 0 { // 250 runs, the waiting write, the waiting form and the step waiting for a person
 		t.Errorf("all of them, once: %d then %d", len(first), len(rest))
 	}
 	// What it remembers of runs is forgotten once they're well before Since.
 	many.Since = now.Add(time.Hour)
 	l.ended = nil
 	many.Check(ctx)
-	if n := loom.ToldOf(many); n != 2 { // only the waiting write and form
+	if n := loom.ToldOf(many); n != 3 { // only the waiting write, form and step
 		t.Errorf("remembers %d things", n)
 	}
 	if _, err := (&loom.Watcher{Client: c, Queue: "a' OR '1'='1"}).Check(ctx); err == nil {
