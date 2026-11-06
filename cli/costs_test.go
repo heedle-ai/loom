@@ -61,7 +61,7 @@ func TestInv_CostsCommand(t *testing.T) {
 	for _, e := range []loom.LedgerEntry{
 		{Kind: loom.LedgerFrontDoor, At: novAt, Workflow: "ask-1", Run: "a1", Activity: "1", Calls: []pirn.Call{{Model: "claude-sonnet-5-5", Input: 500, Output: 50}}},
 		{Kind: loom.LedgerRun, At: novAt, Workflow: "wf-failed", Run: "r9", Schedule: "news"},
-		{Kind: loom.LedgerAttempt, At: novAt, Workflow: "wf-failed/plan", Run: "p9", Activity: "1", Node: "n0", Step: "ask", Attempt: 1, Failed: true, Calls: []pirn.Call{{Model: "claude-sonnet-5-5", Input: 300, Output: 30}}},
+		{Kind: loom.LedgerAttempt, At: novAt, Workflow: "wf-failed/plan", Run: "p9", Activity: "1", Node: "n0", Step: "ask", Attempt: 1, Failed: true, Schedule: "news", Calls: []pirn.Call{{Model: "claude-sonnet-5-5", Input: 300, Output: 30}}},
 	} {
 		if err := loom.WriteLedger(ctx, s, e); err != nil {
 			t.Fatal(err)
@@ -84,6 +84,11 @@ func TestInv_CostsCommand(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)
 		}
+	}
+	// Recorded first, then the ledger's kinds in the page's order
+	// (review 56: "retries" sorted before "recorded").
+	if i, j := strings.Index(got, "news             recorded"), strings.Index(got, "news             failed runs"); i < 0 || j < i || !strings.Contains(got, "SCHEDULE         KIND") {
+		t.Errorf("order or header:\n%s", got)
 	}
 	if strings.Contains(got, "$0.00") || strings.Contains(got, "99") {
 		t.Errorf("a dollar figure without a price, or October's run:\n%s", got)

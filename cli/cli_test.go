@@ -9,12 +9,15 @@ import (
 	"go.temporal.io/api/common/v1"
 	"go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -25,6 +28,7 @@ import (
 	"github.com/heedle-ai/pirn"
 	"github.com/heedle-ai/reed"
 	"github.com/heedle-ai/shuttle/plan"
+	"github.com/heedle-ai/treadle"
 	"github.com/heedle-ai/warp"
 )
 
@@ -873,5 +877,47 @@ func TestInv_SecretCommandsLeaveDetailsBe(t *testing.T) {
 		if err := Run(context.Background(), []string{"secret", op, "HEEDLE_PROFILE_EMAIL"}, io.Discard); err == nil || !strings.Contains(err.Error(), "one of your details") || kc["HEEDLE_PROFILE_EMAIL"] == "" {
 			t.Errorf("secret %s: %v %v", op, err, kc)
 		}
+	}
+}
+
+// recordingWorker keeps every activity registered, by name.
+type recordingWorker struct {
+	worker.Registry
+	acts map[string]any
+}
+
+func (r *recordingWorker) RegisterActivityWithOptions(a any, o activity.RegisterOptions) {
+	r.acts[o.Name] = a
+}
+
+// TestInv_TheWorkerCountsEveryClaudeStep: the worker's real
+// registrations, every command's and the skills', register each Claude
+// step (ask, agent, act, skill) counted in the usage ledger (LOOM-331,
+// review 56: nothing checked the real registrations were wrapped).
+func TestInv_TheWorkerCountsEveryClaudeStep(t *testing.T) {
+	ctx := context.Background()
+	s, err := warp.Init(ctx, filepath.Join(t.TempDir(), "store.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &recordingWorker{acts: map[string]any{}}
+	reg, err := workerCommands(w, s, pirn.Claude{}, pirn.Agent{}, pirn.Act{}, reed.Browser{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := treadle.Register(ctx, reg, loom.Labelled(loom.Counted(w, s)), pirn.Agent{}, &treadle.Library{Store: s}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{pirn.ActivityName, pirn.AgentActivityName, pirn.ActActivityName, treadle.ActivityName} {
+		if a, ok := w.acts[name]; !ok || !loom.IsCounted(a) {
+			t.Errorf("%s is registered uncounted (%T)", name, a)
+		}
+	}
+	src, err := os.ReadFile("cli.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "treadle.Register(ctx, reg, loom.Labelled(loom.Counted(w, s)),") || !strings.Contains(string(src), "WorkerStopTimeout: loom.WorkerStopTimeout") {
+		t.Error("cli.go's worker doesn't count its skills, or stops without letting its steps finish")
 	}
 }

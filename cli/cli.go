@@ -178,8 +178,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		defer c.Close()
 		// Every container a step starts says this store's home (roadmap
-		// 9.2.1, LOOM-520).
-		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store)}))
+		// 9.2.1, LOOM-520); a stopping worker lets steps finish and note
+		// their calls (roadmap 10.4.1).
+		w := worker.New(c, *queue, reed.WorkerOptions(worker.Options{BackgroundActivityContext: loom.WorkerContext(*store), WorkerStopTimeout: loom.WorkerStopTimeout}))
 		// The key and the connectors are read again for every step, so a key
 		// stored or a connector added while the worker runs needs no restart.
 		if _, err := pirn.LookupSecret(ctx, vault, "ANTHROPIC_API_KEY"); err != nil {
@@ -213,7 +214,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// each run is checked against, and records, the versions it pins.
 		lib := &treadle.Library{Store: s}
 		// A skill's attempts are counted in the ledger too (roadmap 10.4.1).
-		skipped, err := treadle.Register(ctx, reg, loom.Counted(loom.Labelled(w), s), agent, lib)
+		skipped, err := treadle.Register(ctx, reg, loom.Labelled(loom.Counted(w, s)), agent, lib)
 		if err != nil {
 			return err
 		}
@@ -874,7 +875,7 @@ func workerCommands(w worker.Registry, s *warp.Store, claude pirn.Claude, agent 
 	// Every step's containers are labelled with its run and step
 	// (LOOM-500), and every attempt of a Claude step is counted in the
 	// usage ledger (LOOM-320).
-	steps := loom.Counted(loom.Labelled(w), s)
+	steps := loom.Labelled(loom.Counted(w, s))
 	if err := bobbin.Register(reg, steps, bobbin.Runner{}); err != nil {
 		return nil, err
 	}

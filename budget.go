@@ -254,7 +254,7 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 	}
 	// And what the ledger holds of its calls no record does: failed
 	// runs, retried attempts (roadmap 10.4.1).
-	extras, err := ExtrasBetween(ctx, r.Store, start, end, runs, in.Schedule)
+	extras, err := ExtrasBetween(ctx, r.Store, start, end, in.Schedule)
 	if err != nil {
 		return "", err
 	}
