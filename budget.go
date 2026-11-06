@@ -208,6 +208,15 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 	if r.Schedules == nil {
 		return "", temporal.NewNonRetryableApplicationError("this worker can't check schedule budgets", "NoBudgetCheck", nil)
 	}
+	// Which schedule started this run, for the ledger: its calls count
+	// toward the schedule's budget even if the run never records
+	// (roadmap 10.4.1).
+	if activity.IsActivity(ctx) && r.Store != nil {
+		e := activity.GetInfo(ctx).WorkflowExecution
+		if err := WriteLedger(ctx, r.Store, LedgerEntry{Kind: LedgerRun, At: in.At.UTC(), Workflow: e.ID, Run: e.RunID, Schedule: in.Schedule}); err != nil {
+			return "", err
+		}
+	}
 	b, err := r.Schedules.Budget(ctx, in.Schedule)
 	if errors.Is(err, ErrNoSchedule) {
 		return "", nil
@@ -242,6 +251,15 @@ func (r *Recorder) Budget(ctx context.Context, in BudgetInput) (string, error) {
 	var u Usage
 	for _, run := range runs {
 		u = u.Add(run.Usage)
+	}
+	// And what the ledger holds of its calls no record does: failed
+	// runs, retried attempts (roadmap 10.4.1).
+	extras, err := ExtrasBetween(ctx, r.Store, start, end, runs, in.Schedule)
+	if err != nil {
+		return "", err
+	}
+	for _, x := range extras {
+		u = u.Add(x.Usage)
 	}
 	c := Cost(u, prices)
 	// A step that can't be priced exactly but can be bounded counts at

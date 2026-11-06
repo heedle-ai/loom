@@ -482,9 +482,27 @@ func AskWorkflow(ctx workflow.Context, in AskRequest) (Proposal, error) {
 	return out, err
 }
 
-// AskActivity is the activity behind AskWorkflow.
+// AskActivity is the activity behind AskWorkflow. Every call its asks
+// make is counted in the ledger (w.Ledger), whether or not a proposal
+// comes of them (roadmap 10.4.1).
 func (w Writer) AskActivity(ctx context.Context, in AskRequest) (Proposal, error) {
-	out, err := w.Ask(ctx, in)
+	m := &pirn.Meter{}
+	out, err := w.Ask(pirn.WithMeter(ctx, m), in)
+	if calls := m.Calls(); len(calls) > 0 && w.Ledger != nil {
+		e := LedgerEntry{Kind: LedgerFrontDoor, At: time.Now().UTC(), Calls: calls}
+		if activity.IsActivity(ctx) {
+			info := activity.GetInfo(ctx)
+			e.Workflow, e.Run, e.Activity, e.Attempt = info.WorkflowExecution.ID, info.WorkflowExecution.RunID, info.ActivityID, info.Attempt
+			if !info.StartedTime.IsZero() {
+				e.At = info.StartedTime.UTC() // the attempt's start, on Temporal's clock
+			}
+		}
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		if werr := WriteLedger(wctx, w.Ledger, e); werr != nil {
+			logLedger(ctx, werr)
+		}
+		cancel()
+	}
 	switch {
 	case errors.Is(err, pirn.ErrInvalid):
 		return out, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidInput", nil)
