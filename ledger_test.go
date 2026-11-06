@@ -577,3 +577,44 @@ func TestInv_ScheduleLookupsAreLogged(t *testing.T) {
 		t.Error("Counted drops scheduleOfRun's error")
 	}
 }
+
+// listingStore counts the refs each listing returns under refs/usage/recorded/.
+type listingStore struct {
+	*warp.Store
+	recorded []string
+}
+
+func (l *listingStore) Refs(ctx context.Context, prefix string) ([]warp.RefInfo, error) {
+	refs, err := l.Store.Refs(ctx, prefix)
+	for _, r := range refs {
+		if strings.HasPrefix(r.Name, loom.LedgerPrefix+"recorded/") {
+			l.recorded = append(l.recorded, r.Name)
+		}
+	}
+	return refs, err
+}
+
+// TestInv_RecordsAreFoundByTheirRun: finding the records that set
+// attempts aside lists only the folders of the runs the window's
+// successful attempts belong to, never every run ever recorded, so a
+// budget check or a page load doesn't slow with the store's history
+// (LOOM-336, review 56 round 3).
+func TestInv_RecordsAreFoundByTheirRun(t *testing.T) {
+	s := newStore(t)
+	at := now()
+	p := must(loom.Compile(ctx, claudeRegistry(t), `(ask "old news")`))
+	for i := 0; i < 20; i++ {
+		if err := loom.NoteRecorded(ctx, s, fmt.Sprintf("loom-old-%d", i), "r", "", at.AddDate(-1, 0, 0), p, map[string]string{"n0": fmt.Sprint(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step := claudeStep{calls: func(string, int32) []pirn.Call { return []pirn.Call{hundred} }, fail: func(_ string, a int32) bool { return a < 2 }}
+	if res, err := ledgerRun(t, s, nil, `(ask "the news")`, "", at, step); err != nil || res.Commit == "" {
+		t.Fatalf("the run: %+v %v", res, err)
+	}
+	ls := &listingStore{Store: s}
+	xs := must(loom.ExtrasBetween(ctx, ls, at.Add(-time.Hour), at.Add(time.Hour), ""))
+	if len(xs) != 1 || xs[0].Kind != loom.ExtraRetry || len(ls.recorded) != 1 {
+		t.Errorf("extras %+v; recorded refs listed: %v", xs, ls.recorded)
+	}
+}
