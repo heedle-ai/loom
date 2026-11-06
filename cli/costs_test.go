@@ -55,6 +55,18 @@ func TestInv_CostsCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The ledger's calls no record holds (roadmap 10.4.1): a front-door
+	// ask, and a failed attempt of a run news started.
+	novAt := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	for _, e := range []loom.LedgerEntry{
+		{Kind: loom.LedgerFrontDoor, At: novAt, Workflow: "ask-1", Run: "a1", Activity: "1", Calls: []pirn.Call{{Model: "claude-sonnet-5-5", Input: 500, Output: 50}}},
+		{Kind: loom.LedgerRun, At: novAt, Workflow: "wf-failed", Run: "r9", Schedule: "news"},
+		{Kind: loom.LedgerAttempt, At: novAt, Workflow: "wf-failed/plan", Run: "p9", Activity: "1", Node: "n0", Step: "ask", Attempt: 1, Failed: true, Calls: []pirn.Call{{Model: "claude-sonnet-5-5", Input: 300, Output: 30}}},
+	} {
+		if err := loom.WriteLedger(ctx, s, e); err != nil {
+			t.Fatal(err)
+		}
+	}
 	prices := filepath.Join(t.TempDir(), "prices.json")
 	var out bytes.Buffer
 	if err := run(ctx, []string{"costs", "-store", dir, "-month", "2026-11", "-prices", prices}, &out); err != nil {
@@ -62,9 +74,11 @@ func TestInv_CostsCommand(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Claude usage in November 2026 (UTC), as recorded; dollars are estimates (est.) with prices as of 2026-11-05",
-		"(not scheduled)  claude-mythos-5-1  1     7      3       no price",
-		"news             claude-sonnet-5-5  2     20000  2000    $0.06",
+		"Claude usage in November 2026 (UTC), every call: as recorded, and from the usage ledger; dollars are estimates (est.) with prices as of 2026-11-05",
+		"(not scheduled)  recorded     claude-mythos-5-1  1     7      3       no price",
+		"(not scheduled)  front door   claude-sonnet-5-5  1     500    50      <$0.01",
+		"news             recorded     claude-sonnet-5-5  2     20000  2000    $0.06",
+		"news             failed runs  claude-sonnet-5-5  1     300    30      <$0.01",
 		"total: $0.06 est. for the steps with a price; 1 steps have no estimate (tokens only)",
 	} {
 		if !strings.Contains(got, want) {
@@ -77,7 +91,7 @@ func TestInv_CostsCommand(t *testing.T) {
 	// In Tokyo, October's last run (23:00 UTC on the 31st) is November's.
 	out.Reset()
 	run(ctx, []string{"costs", "-store", dir, "-month", "2026-11", "-tz", "Asia/Tokyo", "-prices", prices}, &out)
-	if !strings.Contains(out.String(), "news             claude-sonnet-5-5  3     20099  2099") {
+	if !strings.Contains(out.String(), "news             recorded     claude-sonnet-5-5  3     20099  2099") {
 		t.Errorf("Tokyo:\n%s", out.String())
 	}
 	os.WriteFile(prices, []byte(`{"models":{"claude-sonnet-5-5":{"input":"two"}}}`), 0o600)

@@ -353,16 +353,17 @@ func TestInv_ProposalSaysWhatItUsed(t *testing.T) {
 }
 
 // TestInv_CostsSayWhatTheyMiss: the wiki says plainly what costs and
-// budgets can't see, since tokens are only what records hold: a run
-// that failed, an attempt retried, a proposal that never checked, a
-// skill Claude wrote, and that a budget can't stop a run already going.
-// (Review 48: failed runs were invisible to budgets, unsaid.)
+// budgets still can't see: a skill Claude wrote, a program loom write
+// writes, an attempt whose worker died mid-call; and that a budget can't
+// stop a run already going. (Review 48: failed runs were invisible to
+// budgets, unsaid; roadmap 10.4.1 counts them, and retries and the front
+// door, from the usage ledger.)
 func TestInv_CostsSayWhatTheyMiss(t *testing.T) {
 	b, err := os.ReadFile("docs/wiki/How-It-Works.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"A run that fails leaves no record", "a retried attempt", "a proposal that never checked", "a skill Claude writes", "A budget can't stop a run already going"} {
+	for _, want := range []string{"**What still isn't counted:** a skill Claude writes", "a program `loom write` writes", "an attempt whose worker died mid-call", "A budget can't stop a run already going"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("How-It-Works doesn't say %q", want)
 		}

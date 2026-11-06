@@ -421,6 +421,9 @@ type RunUsage struct {
 	Schedule string    `json:"schedule,omitempty"`
 	At       time.Time `json:"at"`
 	Usage    Usage     `json:"usage"`
+	// Outputs are its Claude steps' recorded outputs, as blob IDs, by
+	// node: what sets aside the ledger's entry for each (Extras).
+	Outputs map[string]warp.ID `json:"-"`
 }
 
 // Records is what reading runs' usage needs of a store: a *warp.Store,
@@ -489,6 +492,10 @@ func RecordUsage(ctx context.Context, s Records, commit warp.CommitInfo) (u RunU
 		}
 	}
 	outputs := map[string]string{}
+	u.Outputs = map[string]warp.ID{}
+	for i, n := range names {
+		u.Outputs[n] = ids[i]
+	}
 	if len(ids) > 0 {
 		bs, err := s.Blobs(ctx, ids)
 		if err != nil {
@@ -592,7 +599,7 @@ func AllRunsBetween(ctx context.Context, s Records, from, to time.Time) ([]RunUs
 	seen := map[string]bool{}
 	var out []RunUsage
 	for _, r := range refs {
-		if strings.HasPrefix(r.Name, "refs/treadle/") {
+		if strings.HasPrefix(r.Name, "refs/treadle/") || strings.HasPrefix(r.Name, LedgerPrefix) {
 			continue
 		}
 		runs, err := RunsBetween(ctx, s, r.Name, from, to)

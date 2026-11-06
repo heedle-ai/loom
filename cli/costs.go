@@ -96,7 +96,13 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 	if err != nil {
 		return err
 	}
-	type key struct{ schedule, model string }
+	// And the calls no record holds, from the usage ledger: front-door
+	// asks, retried attempts, failed runs (roadmap 10.4.1).
+	extras, err := loom.ExtrasBetween(ctx, s, from, to, runs, "")
+	if err != nil {
+		return err
+	}
+	type key struct{ schedule, kind, model string }
 	type row struct {
 		runs   map[string]bool
 		tokens loom.Tokens
@@ -104,22 +110,28 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 	}
 	rows := map[key]*row{}
 	var all loom.Usage
-	for _, r := range runs {
-		all = all.Add(r.Usage)
-		for _, st := range r.Usage.Steps {
-			k := key{r.Schedule, st.Model}
+	add := func(schedule, kind, run string, u loom.Usage) {
+		all = all.Add(u)
+		for _, st := range u.Steps {
+			k := key{schedule, kind, st.Model}
 			if st.Missing != "" {
 				k.model = "(no counts)"
 			}
 			if rows[k] == nil {
 				rows[k] = &row{runs: map[string]bool{}}
 			}
-			rows[k].runs[r.Run] = true
+			rows[k].runs[run] = true
 			rows[k].tokens = rows[k].tokens.Add(st.Tokens)
 			rows[k].usage = rows[k].usage.Add(loom.Usage{Steps: []loom.StepUsage{st}})
 		}
 	}
-	fmt.Fprintf(out, "Claude usage in %s (%s), as recorded; dollars are estimates (est.) with prices as of %s, %s\n", from.Format("January 2006"), loc, prices.AsOf, prices.Source)
+	for _, r := range runs {
+		add(r.Schedule, "recorded", r.Run, r.Usage)
+	}
+	for _, x := range extras {
+		add(x.Schedule, x.Kind, x.Workflow, x.Usage)
+	}
+	fmt.Fprintf(out, "Claude usage in %s (%s), every call: as recorded, and from the usage ledger; dollars are estimates (est.) with prices as of %s, %s\n", from.Format("January 2006"), loc, prices.AsOf, prices.Source)
 	if len(prices.Yours) > 0 {
 		fmt.Fprintf(out, "your prices (%s) for: %v\n", pricesFile, prices.Yours)
 	}
@@ -135,10 +147,13 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 		if keys[i].schedule != keys[j].schedule {
 			return keys[i].schedule < keys[j].schedule
 		}
+		if keys[i].kind != keys[j].kind {
+			return keys[i].kind > keys[j].kind // recorded first
+		}
 		return keys[i].model < keys[j].model
 	})
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "SCHEDULE\tMODEL\tRUNS\tINPUT\tOUTPUT\tEST.")
+	fmt.Fprintln(tw, "SCHEDULE\tCALLS\tMODEL\tRUNS\tINPUT\tOUTPUT\tEST.")
 	for _, k := range keys {
 		r := rows[k]
 		sched := k.schedule
@@ -155,7 +170,7 @@ func costs(ctx context.Context, out io.Writer, store, month, zone, pricesFile st
 		case !priced:
 			est = "no price"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n", sched, k.model, len(r.runs), r.tokens.Input, r.tokens.Output, est)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n", sched, k.kind, k.model, len(r.runs), r.tokens.Input, r.tokens.Output, est)
 	}
 	tw.Flush()
 	c := loom.Cost(all, prices)

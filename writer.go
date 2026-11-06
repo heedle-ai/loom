@@ -17,6 +17,7 @@ import (
 	"github.com/heedle-ai/draft/registry"
 	"github.com/heedle-ai/pirn"
 	"github.com/heedle-ai/shuttle/plan"
+	"github.com/heedle-ai/warp"
 )
 
 // The program writer: describe a task in words, and Claude writes the
@@ -107,6 +108,9 @@ type Writer struct {
 	// MemoryFile, if set, is what this worker's front door remembers about
 	// the person (ReadMemory), sent to Claude with every request.
 	MemoryFile string
+	// Ledger, if set, is the store whose usage ledger counts every
+	// front-door ask (AskActivity; roadmap 10.4.1).
+	Ledger *warp.Store
 }
 
 // ErrNoProgram is a description Claude couldn't write a compiling program

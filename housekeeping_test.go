@@ -87,7 +87,7 @@ func TestInv_EveryStepIsLabelled(t *testing.T) {
 			t.Errorf("cli.go: %s registers with %s, not steps (loom.Labelled)", m[0], m[1])
 		}
 	}
-	if !strings.Contains(string(src), "steps := loom.Labelled(w)") || !strings.Contains(string(src), "treadle.Register(ctx, reg, loom.Labelled(w),") {
+	if !strings.Contains(string(src), "steps := loom.Counted(loom.Labelled(w), s)") || !strings.Contains(string(src), "treadle.Register(ctx, reg, loom.Counted(loom.Labelled(w), s),") {
 		t.Error("cli.go doesn't register its commands and skills through loom.Labelled")
 	}
 }

@@ -205,14 +205,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		act := pirn.Act{Claude: claude, Browser: pirn.ReedBrowser{Browser: reed.Browser{Image: *browserAgentImage, Network: *browserNetwork}}, Image: *browserAgentImage,
 			Confirm: loom.Confirmer(c),  // a person confirms each send (roadmap 9.7)
 			Script:  loom.Scripts(c, s)} // the program's last script, replayed without Claude (roadmap 9.9)
-		reg, err := workerCommands(w, claude, agent, act, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
+		reg, err := workerCommands(w, s, claude, agent, act, reed.Browser{Image: *browserImage, Network: *browserNetwork}, imageRegistryFor(*imageRegistry))
 		if err != nil {
 			return err
 		}
 		// Skills are the store's, at their newest when the worker starts;
 		// each run is checked against, and records, the versions it pins.
 		lib := &treadle.Library{Store: s}
-		skipped, err := treadle.Register(ctx, reg, loom.Labelled(w), agent, lib)
+		// A skill's attempts are counted in the ledger too (roadmap 10.4.1).
+		skipped, err := treadle.Register(ctx, reg, loom.Counted(loom.Labelled(w), s), agent, lib)
 		if err != nil {
 			return err
 		}
@@ -233,7 +234,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// and its commands and newest skills.
 		// and the front door (ask), which also says whether a proposal can
 		// run now, from this worker's skills, connectors and keys.
-		writer := loom.Writer{Asker: claude, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
+		writer := loom.Writer{Asker: claude, Ledger: s, Commands: func(ctx context.Context) (*draftregistry.Registry, []loom.Command, error) {
 			return commandsFor(ctx, *store, registry())
 		}, Ready: func(ctx context.Context, p plan.Plan) (loom.Readiness, error) {
 			cs, err := loadConnectors()
@@ -868,10 +869,12 @@ func imageRegistryFor(repo string) *bobbin.ImageRegistry {
 // returns their registry: the same commands registry() has, which
 // TestWorkerCommandsAreTheRegistry checks, since a run is checked
 // against registry() with the plan's skill pins.
-func workerCommands(w worker.Registry, claude pirn.Claude, agent pirn.Agent, act pirn.Act, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
+func workerCommands(w worker.Registry, s *warp.Store, claude pirn.Claude, agent pirn.Agent, act pirn.Act, browser reed.Browser, images *bobbin.ImageRegistry) (*draftregistry.Registry, error) {
 	reg := draft.DefaultRegistry()
-	// Every step's containers are labelled with its run and step (LOOM-500).
-	steps := loom.Labelled(w)
+	// Every step's containers are labelled with its run and step
+	// (LOOM-500), and every attempt of a Claude step is counted in the
+	// usage ledger (LOOM-320).
+	steps := loom.Counted(loom.Labelled(w), s)
 	if err := bobbin.Register(reg, steps, bobbin.Runner{}); err != nil {
 		return nil, err
 	}

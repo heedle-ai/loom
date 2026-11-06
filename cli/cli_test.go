@@ -176,7 +176,7 @@ func TestSkillsCommand(t *testing.T) {
 func TestWorkerCommandsAreTheRegistry(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	reg, err := workerCommands(env, pirn.Claude{}, pirn.Agent{}, pirn.Act{}, reed.Browser{}, nil)
+	reg, err := workerCommands(env, nil, pirn.Claude{}, pirn.Agent{}, pirn.Act{}, reed.Browser{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
