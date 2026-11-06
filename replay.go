@@ -132,7 +132,7 @@ func Scripts(c client.Client, s Records) func(context.Context, string) (pirn.Act
 		if !ok {
 			return pirn.ActScript{}, false, nil
 		}
-		in, err := runInput(ctx, c, run)
+		in, err := RunInputOf(ctx, c, run)
 		if err != nil {
 			return pirn.ActScript{}, false, err
 		}
@@ -144,9 +144,11 @@ func Scripts(c client.Client, s Records) func(context.Context, string) (pirn.Act
 	}
 }
 
-// runInput is the input the run workflowID was started with, from the
+// RunInputOf is the input the run workflowID was started with, from the
 // first event of its history; its ref defaulted as RunWorkflow defaults it.
-func runInput(ctx context.Context, c client.Client, workflowID string) (RunInput, error) {
+// drawdown reads it to know whether a run's act steps are signed in as
+// the person (roadmap 9.11, review 53).
+func RunInputOf(ctx context.Context, c client.Client, workflowID string) (RunInput, error) {
 	it := c.GetWorkflowHistory(ctx, workflowID, "", false, enums.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
 	if !it.HasNext() {
 		return RunInput{}, errors.New("loom: the run's history is empty")
