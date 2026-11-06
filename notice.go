@@ -171,9 +171,25 @@ func (w *Watcher) Check(ctx context.Context) ([]Notice, error) {
 			}
 			w.told[key] = now
 		}
+		// Steps waiting for a person to take the wheel (roadmap 9.10).
+		qctx, cancel = context.WithTimeout(ctx, AskWithin)
+		wheels, err := PendingWheels(qctx, w.Client, wf)
+		cancel()
+		if err != nil {
+			continue
+		}
+		for _, h := range wheels {
+			key := "wheel:" + wf + "/" + h.ID
+			waiting[key] = true
+			if _, ok := w.told[key]; !ok {
+				out = append(out, Notice{Key: key, Workflow: wf, Run: run,
+					Title: "heedle needs you", Body: fmt.Sprintf("Claude says: “%s” From step %s. Take the wheel on the run page.", clipNotice(h.Reason), h.Node)})
+			}
+			w.told[key] = now
+		}
 	}
 	for k := range w.told {
-		if (strings.HasPrefix(k, "write:") || strings.HasPrefix(k, "form:")) && !waiting[k] {
+		if (strings.HasPrefix(k, "write:") || strings.HasPrefix(k, "form:") || strings.HasPrefix(k, "wheel:")) && !waiting[k] {
 			delete(w.told, k)
 		}
 	}
