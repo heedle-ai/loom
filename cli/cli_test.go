@@ -660,6 +660,13 @@ func TestInv_AskDisclosesActHosts(t *testing.T) {
 	if want := "\nact steps may use your email and date of birth\n"; !strings.Contains(out.String(), want) || strings.Join(loom.ActUses(pl), " ") != "email birthdate" {
 		t.Errorf("missing %q in:\n%s", want, out.String())
 	}
+	// Roadmap 9.11: where they start signed in as you.
+	out.Reset()
+	pl.Nodes = append(pl.Nodes, plan.Node{ID: "n3", Activity: pirn.ActActivityName, Args: []string{"x", "https://forms.example.org/", pirn.SignedIn, "forms.example.org"}})
+	printProposal(&out, loom.Proposal{Summary: "Me.", Program: "(act ...)", Plan: &pl})
+	if want := "start signed in as you on forms.example.org"; !strings.Contains(out.String(), want) || strings.Join(loom.ActSignedIn(pl), " ") != "forms.example.org" {
+		t.Errorf("missing %q in:\n%s", want, out.String())
+	}
 	out.Reset()
 	echo := plan.Plan{Nodes: []plan.Node{{ID: "n0", Activity: "Echo", Args: []string{"hi"}}}}
 	printProposal(&out, loom.Proposal{Summary: "Hi.", Program: `(echo "hi")`, Plan: &echo})
@@ -893,6 +900,16 @@ func TestInv_DeleteAllForgetsSignIns(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the sign-ins' files are still there")
+	}
+	// A folder named by mistake keeps everything but sign-ins (review 53).
+	home := t.TempDir()
+	t.Setenv("HEEDLE_SESSIONS", home)
+	os.WriteFile(filepath.Join(home, "notes.txt"), []byte("mine"), 0o644)
+	if err := Run(ctx, []string{"secret", "delete", "--all"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(home, "notes.txt")); err != nil || string(b) != "mine" {
+		t.Error("delete --all removed a file that wasn't a sign-in")
 	}
 }
 

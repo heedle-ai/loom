@@ -1028,21 +1028,21 @@ var vault interface {
 // asks first; a script (as an uninstaller is) isn't asked.
 func deleteAllSecrets(ctx context.Context, out io.Writer) error {
 	if isTerminal() {
-		fmt.Fprintf(out, "Delete every key heedle keeps in your keychain (service %q)? This can't be undone. Type yes: ", pirn.KeychainService)
+		fmt.Fprintf(out, "Delete every key heedle keeps in your keychain (service %q), and forget your saved sign-ins? This can't be undone. Type yes: ", pirn.KeychainService)
 		line, _ := bufio.NewReader(io.LimitReader(stdin, 64)).ReadString('\n')
 		if strings.TrimSpace(line) != "yes" {
 			fmt.Fprintln(out, "Nothing deleted.")
 			return nil
 		}
 	}
+	// Saved sign-ins go first (roadmap 9.11): each file and its key, and
+	// nothing else in their folder (review 53).
+	if err := (pirn.Sessions{Dir: sessionsDir(), Vault: vault}).ForgetAll(ctx); err != nil {
+		return fmt.Errorf("forgetting your saved sign-ins: %w", err)
+	}
 	n, err := vault.DeleteAll(ctx)
 	if err != nil {
 		return err
-	}
-	// Saved sign-ins go too (roadmap 9.11): their keys were heedle's, and
-	// their files are removed.
-	if err := os.RemoveAll(sessionsDir()); err != nil {
-		return fmt.Errorf("forgetting your saved sign-ins: %w", err)
 	}
 	if n < 0 {
 		fmt.Fprintln(out, "Deleted every heedle key from your keychain, and your saved sign-ins.")
@@ -1212,7 +1212,16 @@ func actDisclosures(p plan.Plan) []string {
 	if u := loom.ActUses(p); len(u) > 0 {
 		out = append(out, UsesDisclosure(u))
 	}
+	if s := loom.ActSignedIn(p); len(s) > 0 {
+		out = append(out, SignedInDisclosure(s))
+	}
 	return out
+}
+
+// SignedInDisclosure says where act steps start signed in as the person
+// (roadmap 9.11).
+func SignedInDisclosure(hosts []string) string {
+	return "start signed in as you on " + strings.Join(hosts, ", ") + ", with the sign-ins you kept, and always ask before sending"
 }
 
 // noteUses says, before a run or schedule starts, which of the person's
@@ -1221,6 +1230,9 @@ func actDisclosures(p plan.Plan) []string {
 func noteUses(out io.Writer, p plan.Plan) {
 	if u := loom.ActUses(p); len(u) > 0 {
 		fmt.Fprintf(out, "act steps %s\n", UsesDisclosure(u))
+	}
+	if s := loom.ActSignedIn(p); len(s) > 0 {
+		fmt.Fprintf(out, "act steps %s\n", SignedInDisclosure(s))
 	}
 }
 

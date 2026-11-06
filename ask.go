@@ -640,6 +640,29 @@ func ActUses(p plan.Plan) []string {
 	return out
 }
 
+// ActSignedIn are the hosts p's act steps start signed in on, as the
+// person, with the sign-ins they kept (:signed-in), sorted, each once: the
+// ones a front door discloses in red (roadmap 9.11).
+func ActSignedIn(p plan.Plan) []string {
+	in := map[string]bool{}
+	for _, n := range p.Nodes {
+		if n.Activity != pirn.ActActivityName {
+			continue
+		}
+		if hs, ok := pirn.ActSignedIn(n.Args); ok {
+			for _, h := range hs {
+				in[h] = true
+			}
+		}
+	}
+	out := []string{}
+	for h := range in {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ActSendsFreely are the hosts of p's act steps whose program lets them
 // send without asking (:send-without-asking), sorted, each once: the ones
 // a front door discloses in red (roadmap 9.7). Every other act step stops
